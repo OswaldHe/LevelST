@@ -24,7 +24,7 @@ void TrigSolver(tapa::mmaps<float, NUM_CH> csr_val,
 			tapa::mmaps<int, NUM_CH> csc_row_ind, 
 			tapa::mmaps<float, NUM_CH> f, 
 			tapa::mmap<float> x, 
-			int N, tapa::mmap<int> K, tapa::mmap<int> cycle_count);
+			int N, tapa::mmap<int> K_csr, tapa::mmap<int> K_csc, tapa::mmap<int> cycle_count);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
 
@@ -36,7 +36,8 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 		aligned_vector<int>& csc_row_ind,
 		aligned_vector<float>& csc_val,
 		vector<aligned_vector<int>>& csc_col_ptr_fpga,
-		vector<aligned_vector<int>>& csc_row_ind_fpga){
+		vector<aligned_vector<int>>& csc_row_ind_fpga,
+		aligned_vector<int>& K_csc){
 
 	csc_col_ptr.resize(N, 0);
 	csc_row_ind.resize(K, 0);
@@ -69,6 +70,10 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 			col_nz[c]++;
 		}
 	}
+
+	for(int i = 0; i < NUM_CH; i++){
+		K_csc.push_back(csc_row_ind_fpga[i].size());
+	}
 }
 
 void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, aligned_vector<int>& csr_col_ind, aligned_vector<float>& csr_val){
@@ -97,8 +102,9 @@ int main(int argc, char* argv[]){
 
 	const int N = argc > 1 ? atoll(argv[1]) : 2048;
 	const int remainder = N % WINDOW_SIZE;
-	int K = N*2-N/WINDOW_SIZE;
-	if(remainder != 0) K --;
+	// int K = N*2-N/WINDOW_SIZE;
+	// if(remainder != 0) K --;
+	int K = N*2 - 1;
 
 	aligned_vector<float> A(K);
 	aligned_vector<int> IA(N);
@@ -128,13 +134,12 @@ int main(int argc, char* argv[]){
     for (int i = 0; i < N; ++i) {
 		f[i] = 0.5*(i+1);
 		f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
-		if(i % WINDOW_SIZE == 0) {
+		if(i == 0) {
 			A[ind] = i+1;
 			A_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i+1);
 			JA[ind] = i;
 			JA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i);
-			if(i != 0) K_fpga.push_back(acc);
-			acc = 1;
+			acc += 1;
 			ind++;
 		} else {
 			A[ind] = 1.f;
@@ -145,6 +150,10 @@ int main(int argc, char* argv[]){
 			A_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i+1);
 			JA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i-1);
 			JA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i);
+			if(i % WINDOW_SIZE == 0) {
+				K_fpga.push_back(acc);
+				acc = 0;
+			}
 			acc +=2;
 			ind+=2;
 		}
@@ -154,20 +163,21 @@ int main(int argc, char* argv[]){
 	K_fpga.push_back(acc);
 	//readCSRMatrix("L_can256.txt", IA, JA, A);
 	
-	std::clog << A_fpga[0].size() << std::endl;
+	std::clog << K_fpga[1] << std::endl;
 	// std::clog << IA.size() << std::endl;
 	// std::clog << A.size() << std::endl;
 
 	aligned_vector<float> csc_val(K, 0.0);
 	aligned_vector<int> csc_col_ptr(N, 0);
 	aligned_vector<int> csc_row_ind(K, 0);
+	aligned_vector<int> K_csc;
 
 	//for kernel
 	vector<aligned_vector<int>> csc_col_ptr_fpga(NUM_CH);
 	vector<aligned_vector<int>> csc_row_ind_fpga(NUM_CH);
 
-	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga);
-	std::clog << csc_row_ind_fpga[0][511] <<std::endl;
+	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
+	//std::clog << csc_row_ind_fpga[0][511] <<std::endl;
 
 	//triangular solver in cpu
 	float expected_x[N];
@@ -206,7 +216,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga),
-                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_fpga), tapa::write_only_mmap<int>(cycle));
+                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_fpga), tapa::read_only_mmap<int>(K_csc), tapa::write_only_mmap<int>(cycle));
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
 	
