@@ -1,3 +1,4 @@
+#include <ap_int.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -17,14 +18,13 @@ constexpr int WINDOW_SIZE = 256;
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
 
-void TrigSolver(tapa::mmaps<float, NUM_CH> csr_val, 
-			tapa::mmaps<int, NUM_CH> csr_row_ptr, 
-			tapa::mmaps<int, NUM_CH> csr_col_ind, 
+void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
+			tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
 			tapa::mmaps<int, NUM_CH> csc_col_ptr, 
 			tapa::mmaps<int, NUM_CH> csc_row_ind, 
 			tapa::mmaps<float, NUM_CH> f, 
 			tapa::mmap<float> x, 
-			int N, tapa::mmap<int> K_csr, tapa::mmap<int> K_csc, tapa::mmap<int> cycle_count);
+			int N, tapa::mmap<int> K_csc, tapa::mmap<int> cycle_count);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
 
@@ -76,6 +76,37 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 	}
 }
 
+void generate_edgelist_for_pes(int N,  
+		const aligned_vector<int>& csr_row_ptr,
+		const aligned_vector<int>& csr_col_ind,
+		const aligned_vector<float>& csr_val,
+		vector<aligned_vector<ap_uint<96>>>& edge_list_ch,
+		vector<aligned_vector<int>>& edge_list_ptr){
+			for(int i = 0; i < N/WINDOW_SIZE; i++){
+				vector<aligned_vector<ap_uint<96>>> tmp_edge_list(i+1);
+				for(int j = i*WINDOW_SIZE; j < (i+1)*WINDOW_SIZE && j < N; j++){
+					int start = (j == 0)? 0 : csr_row_ptr[j-1];
+					int end = csr_row_ptr[j];
+					for(int k = start; k < end; k++){
+						ap_uint<96> a = 0;
+						a(95, 64) = j - i*WINDOW_SIZE;
+						a(63, 32) = csr_col_ind[k];
+						a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
+						tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE].push_back(a);
+					}
+				}
+				
+				// std::clog << "pe: " << i << std::endl;
+				for(int j = 0; j < i+1; j++){
+					//std::clog << tmp_edge_list[j].size() << std::endl;
+					edge_list_ptr[i].push_back(tmp_edge_list[j].size());
+					for(int k = 0; k < tmp_edge_list[j].size(); k++){
+						edge_list_ch[i].push_back(tmp_edge_list[j][k]);
+					}
+				}
+			}
+		}
+
 void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, aligned_vector<int>& csr_col_ind, aligned_vector<float>& csr_val){
 	std::ifstream file(filename);
 	std::string line;
@@ -114,9 +145,8 @@ int main(int argc, char* argv[]){
 	aligned_vector<int> cycle(1, 0); 
 
 	// for kernel
-	vector<aligned_vector<float>> A_fpga(NUM_CH);
-	vector<aligned_vector<int>> IA_fpga(NUM_CH);
-	vector<aligned_vector<int>> JA_fpga(NUM_CH);
+	vector<aligned_vector<ap_uint<96>>> edge_list_ch(NUM_CH);
+	vector<aligned_vector<int>> edge_list_ptr(NUM_CH);
 	vector<aligned_vector<float>> f_fpga(NUM_CH);
 	aligned_vector<float> x_fpga(N, 0.0);
 	aligned_vector<int> K_fpga;
@@ -136,9 +166,7 @@ int main(int argc, char* argv[]){
 		f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
 		if(i == 0) {
 			A[ind] = i+1;
-			A_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i+1);
 			JA[ind] = i;
-			JA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i);
 			acc += 1;
 			ind++;
 		} else {
@@ -146,10 +174,6 @@ int main(int argc, char* argv[]){
 			JA[ind] = i-1;
 			A[ind+1] = i+1;
 			JA[ind+1] = i;
-			A_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(1.f);
-			A_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i+1);
-			JA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i-1);
-			JA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(i);
 			if(i % WINDOW_SIZE == 0) {
 				K_fpga.push_back(acc);
 				acc = 0;
@@ -158,7 +182,6 @@ int main(int argc, char* argv[]){
 			ind+=2;
 		}
 		IA[i] = ind;
-		IA_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(acc);
     }
 	K_fpga.push_back(acc);
 	//readCSRMatrix("L_can256.txt", IA, JA, A);
@@ -177,6 +200,7 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<int>> csc_row_ind_fpga(NUM_CH);
 
 	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
+	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
 	//std::clog << csc_row_ind_fpga[0][511] <<std::endl;
 
 	//triangular solver in cpu
@@ -210,13 +234,12 @@ int main(int argc, char* argv[]){
 	cycle[0] = 0;
 
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
-                        tapa::read_only_mmaps<float, NUM_CH>(A_fpga),
-                        tapa::read_only_mmaps<int, NUM_CH>(IA_fpga),
-						tapa::read_only_mmaps<int, NUM_CH>(JA_fpga),
+                        tapa::read_only_mmaps<ap_uint<96>, NUM_CH>(edge_list_ch),
+						tapa::read_only_mmaps<int, NUM_CH>(edge_list_ptr),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga),
-                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_fpga), tapa::read_only_mmap<int>(K_csc), tapa::write_only_mmap<int>(cycle));
+                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_csc), tapa::write_only_mmap<int>(cycle));
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
 	
