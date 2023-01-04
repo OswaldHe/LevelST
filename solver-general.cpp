@@ -447,6 +447,7 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 						ap_uint<32> col = a_entry(63, 32);
 						ap_uint<32> val = a_entry(31, 0);
 						float val_f = tapa::bit_cast<float>(val);
+						// if(round == 1 && pe_i == 0) LOG(INFO) << "(" << (int)row << "," << (int) col << "): " << val_f;
 						if(tapa::bit_cast<int>(row) != prev_row){
 							if(prev_row != -1){
 								solver_row_ptr_a.write(row_ptr);
@@ -501,15 +502,17 @@ void read_A_and_split(int pe_i, int N,
 	tapa::ostream<ap_uint<96>>& spmv_val,
 	tapa::ostream<int>& spmv_inst){
 		int offset = 0;
+		int offset_i = 0;
 		int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
 		for(int round = 0;round < bound;round++){
 			for(int i = 0; i < pe_i+NUM_CH*round+1; i++){
-				const int N = csr_edge_list_ptr[i];
-				if(i == pe_i) fifo_A_ptr.write(N);
+				const int N = csr_edge_list_ptr[i+offset_i];
+				if(i == pe_i+NUM_CH*round) {
+					fifo_A_ptr.write(N);
+				}
 				else {
 					spmv_inst.write(N);
-					//if(pe_i == 3) LOG(INFO) << N;
 				}
 				for (int i_req = 0, i_resp = 0; i_resp < N;) {
 					if(i_req < N && !csr_edge_list_ch.read_addr.full()){
@@ -517,12 +520,12 @@ void read_A_and_split(int pe_i, int N,
 							++i_req;
 					}
 					if(!csr_edge_list_ch.read_data.empty()){
-						if(i == pe_i && !fifo_A_ch.full()){
+						if(i == pe_i+NUM_CH*round && !fifo_A_ch.full()){
 							ap_uint<96> tmp;
 							csr_edge_list_ch.read_data.try_read(tmp);
 							fifo_A_ch.try_write(tmp);
 							++i_resp;
-						}else if(i != pe_i && !spmv_val.full()){
+						}else if(i != pe_i+NUM_CH*round && !spmv_val.full()){
 							ap_uint<96> tmp;
 							csr_edge_list_ch.read_data.try_read(tmp);
 							spmv_val.try_write(tmp);
@@ -532,6 +535,7 @@ void read_A_and_split(int pe_i, int N,
 				}
 				offset+=N;
 			}
+			offset_i += (pe_i+NUM_CH*round+1);
 		}
 	}
 
@@ -549,6 +553,7 @@ void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<floa
 		}
 		for(int i = 0; i < WINDOW_SIZE; i++){
 			if(is_last && round == bound){
+				//if(pe_i == 0) LOG(INFO) << i;
 				x_res.write(x_second.read());
 			}else{
 				x_out.write(x_second.read());
@@ -701,7 +706,7 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 
 	tapa::streams<int, NUM_CH> K_csc_val("k_csc_val");
 	tapa::streams<int, NUM_CH> N_val("n_val");
-	tapa::streams<float, NUM_CH+1> x_q("x_pipe");
+	tapa::streams<float, NUM_CH+1, WINDOW_SIZE> x_q("x_pipe");
 	tapa::stream<float> x_cyc("x_cyc");
 	tapa::streams<float, NUM_CH> x_res("x_res");
 

@@ -99,9 +99,9 @@ void generate_edgelist_for_pes(int N,
 				// std::clog << "pe: " << i << std::endl;
 				for(int j = 0; j < i+1; j++){
 					//std::clog << tmp_edge_list[j].size() << std::endl;
-					edge_list_ptr[i].push_back(tmp_edge_list[j].size());
+					edge_list_ptr[i%NUM_CH].push_back(tmp_edge_list[j].size());
 					for(int k = 0; k < tmp_edge_list[j].size(); k++){
-						edge_list_ch[i].push_back(tmp_edge_list[j][k]);
+						edge_list_ch[i%NUM_CH].push_back(tmp_edge_list[j][k]);
 					}
 				}
 			}
