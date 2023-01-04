@@ -67,8 +67,10 @@ inline void write_float_vec(tapa::istream<float> stream, tapa::async_mmap<float>
   }
 }
 
-void write_x(tapa::istream<float>& x, tapa::async_mmap<float>& mmap, int N){
-	write_float_vec(x, mmap, N, 0);
+void write_x(tapa::istreams<float, NUM_CH>& x_res, tapa::async_mmap<float>& mmap, int N){
+	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	int last = ((level%NUM_CH)+7)%NUM_CH;
+	write_float_vec(x_res[last], mmap, N, 0);
 }
 
 void read_float_vec(tapa::async_mmap<float>& mmap, tapa::istream<int>& len_in, tapa::ostream<int>& len_out,
@@ -149,45 +151,47 @@ void PEG_Xvec( int pe_i,
 		float local_res[WINDOW_SIZE];
 		float local_x[WINDOW_SIZE];
 
-		//reset
-		for(int i = 0; i < WINDOW_SIZE; i++){
-			local_res[i] = 0.0;
-		}
+		for(int round = 0;; round++){
+			//reset
+			for(int i = 0; i < WINDOW_SIZE; i++){
+				local_res[i] = 0.0;
+			}
 
-		for(int ite = 0; ite < pe_i; ite++){
-			const int N = fifo_inst_in.read();
-			//read x
-			bool x_val_succ = false;
-			float x_val = 0.0;
-			for(int i = 0; i < WINDOW_SIZE;){
-				x_val = fifo_x_in.read(x_val_succ);
-				if(x_val_succ){
-					fifo_x_out.write(x_val);
-					local_x[i] = x_val;
-					x_val_succ = false;
-					i++;
+			for(int ite = 0; ite < pe_i+round*NUM_CH; ite++){
+				const int N = fifo_inst_in.read();
+				//read x
+				bool x_val_succ = false;
+				float x_val = 0.0;
+				for(int i = 0; i < WINDOW_SIZE;){
+					x_val = fifo_x_in.read(x_val_succ);
+					if(x_val_succ){
+						fifo_x_out.write(x_val);
+						local_x[i] = x_val;
+						x_val_succ = false;
+						i++;
+					}
+				}
+
+				//read A and compute
+				bool a_val_succ = false;
+				for(int i = 0; i < N;){
+					ap_uint<96> a = spmv_A.read(a_val_succ);
+					if(a_val_succ){
+						ap_uint<32> a_row = a(95, 64);
+						ap_uint<32> a_col = a(63, 32);
+						ap_uint<32> a_val = a(31, 0);
+						float a_val_f = tapa::bit_cast<float>(a_val);
+						local_res[a_row] += local_x[a_col - ite * WINDOW_SIZE] * a_val_f;
+						a_val_succ = false;
+						i++;
+					}
 				}
 			}
 
-			//read A and compute
-			bool a_val_succ = false;
-			for(int i = 0; i < N;){
-				ap_uint<96> a = spmv_A.read(a_val_succ);
-				if(a_val_succ){
-					ap_uint<32> a_row = a(95, 64);
-					ap_uint<32> a_col = a(63, 32);
-					ap_uint<32> a_val = a(31, 0);
-					float a_val_f = tapa::bit_cast<float>(a_val);
-					local_res[a_row] += local_x[a_col - ite * WINDOW_SIZE] * a_val_f;
-					a_val_succ = false;
-					i++;
-				}
+			//write result
+			for(int i = 0; i < WINDOW_SIZE; i++){
+				fifo_y_out.write(local_res[i]);
 			}
-		}
-
-		//write result
-		for(int i = 0; i < WINDOW_SIZE; i++){
-			fifo_y_out.write(local_res[i]);
 		}
 		
 	}
@@ -451,7 +455,7 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 							prev_row = tapa::bit_cast<int>(row);
 						}
 						solver_val.write(val_f);
-						solver_col_ind.write(tapa::bit_cast<int>(col)-pe_i*WINDOW_SIZE);
+						solver_col_ind.write(tapa::bit_cast<int>(col)-(pe_i+NUM_CH*round)*WINDOW_SIZE);
 						row_ptr++;
 						fifo_A_succ = false;
 						i++;
@@ -489,7 +493,7 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 		}
 }
 
-void read_A_and_split(int pe_i,
+void read_A_and_split(int pe_i, int N,
 	tapa::async_mmap<ap_uint<96>>& csr_edge_list_ch,
 	tapa::mmap<int> csr_edge_list_ptr,
 	tapa::ostream<ap_uint<96>>& fifo_A_ch,
@@ -497,42 +501,59 @@ void read_A_and_split(int pe_i,
 	tapa::ostream<ap_uint<96>>& spmv_val,
 	tapa::ostream<int>& spmv_inst){
 		int offset = 0;
-		for(int i = 0; i < pe_i+1; i++){
-			const int N = csr_edge_list_ptr[i];
-			if(i == pe_i) fifo_A_ptr.write(N);
-			else {
-				spmv_inst.write(N);
-				//if(pe_i == 3) LOG(INFO) << N;
-			}
-			for (int i_req = 0, i_resp = 0; i_resp < N;) {
-				if(i_req < N && !csr_edge_list_ch.read_addr.full()){
-						csr_edge_list_ch.read_addr.try_write(i_req+offset);
-						++i_req;
+		int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
+		for(int round = 0;round < bound;round++){
+			for(int i = 0; i < pe_i+NUM_CH*round+1; i++){
+				const int N = csr_edge_list_ptr[i];
+				if(i == pe_i) fifo_A_ptr.write(N);
+				else {
+					spmv_inst.write(N);
+					//if(pe_i == 3) LOG(INFO) << N;
 				}
-				if(!csr_edge_list_ch.read_data.empty()){
-					if(i == pe_i && !fifo_A_ch.full()){
-						ap_uint<96> tmp;
-						csr_edge_list_ch.read_data.try_read(tmp);
-						fifo_A_ch.try_write(tmp);
-						++i_resp;
-					}else if(i != pe_i && !spmv_val.full()){
-						ap_uint<96> tmp;
-						csr_edge_list_ch.read_data.try_read(tmp);
-						spmv_val.try_write(tmp);
-						++i_resp;
+				for (int i_req = 0, i_resp = 0; i_resp < N;) {
+					if(i_req < N && !csr_edge_list_ch.read_addr.full()){
+							csr_edge_list_ch.read_addr.try_write(i_req+offset);
+							++i_req;
+					}
+					if(!csr_edge_list_ch.read_data.empty()){
+						if(i == pe_i && !fifo_A_ch.full()){
+							ap_uint<96> tmp;
+							csr_edge_list_ch.read_data.try_read(tmp);
+							fifo_A_ch.try_write(tmp);
+							++i_resp;
+						}else if(i != pe_i && !spmv_val.full()){
+							ap_uint<96> tmp;
+							csr_edge_list_ch.read_data.try_read(tmp);
+							spmv_val.try_write(tmp);
+							++i_resp;
+						}
 					}
 				}
+				offset+=N;
 			}
-			offset+=N;
 		}
 	}
 
-void X_Merger(int pe_i, tapa::istream<float>& x_first, tapa::istream<float>& x_second, tapa::ostream<float>& x_out){
-	for(int i = 0; i < pe_i * WINDOW_SIZE; i++){
-		x_out.write(x_first.read());
-	}
-	for(int i = 0; i < WINDOW_SIZE; i++){
-		x_out.write(x_second.read());
+void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<float>& x_second, tapa::ostream<float>& x_out, tapa::ostream<float>& x_res){
+	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	bool is_last = (level % NUM_CH == (pe_i+1)%NUM_CH);
+	int bound = (level % NUM_CH == 0) ? (level / NUM_CH) - 1 : level/NUM_CH; 
+	for(int round = 0;;round++){
+		for(int i = 0; i < (pe_i+round*NUM_CH) * WINDOW_SIZE; i++){
+			if(is_last && round == bound){
+				x_res.write(x_first.read());
+			}else{
+				x_out.write(x_first.read());
+			}
+		}
+		for(int i = 0; i < WINDOW_SIZE; i++){
+			if(is_last && round == bound){
+				x_res.write(x_second.read());
+			}else{
+				x_out.write(x_second.read());
+			}
+		}
 	}
 }
 
@@ -575,9 +596,9 @@ void broadcast(tapa::istream<int>& N, tapa::ostream<int>& N_sub){
 	}
 }
 
-void fill_zero(tapa::ostream<float>& fifo_out){
+void x_adapter(tapa::istream<float>& x_in, tapa::ostream<float>& x_out){
 	for(;;){
-		fifo_out.write(0.0);
+		x_out.write(x_in.read());
 	}
 }
 
@@ -594,7 +615,7 @@ void Timer(tapa::istream<bool>& q_done, tapa::mmap<int> cycle_count){
         cycle_count[0] = i;
 }
 
-void SolverMiddleware( int pe_i,
+void SolverMiddleware( int pe_i, int N,
 	tapa::mmap<ap_uint<96>> csr_edge_list_ch,
 	tapa::mmap<int> csr_edge_list_ptr,
 	tapa::mmap<float> f,
@@ -602,6 +623,7 @@ void SolverMiddleware( int pe_i,
 	tapa::mmap<int> csc_row_ind,
 	tapa::istream<float>& x_q_in,
 	tapa::ostream<float>& x_q_out,
+	tapa::ostream<float>& x_res,
 	tapa::istream<int>& N_val,
 	tapa::istream<int>& K_csc_val){
 		
@@ -623,7 +645,6 @@ void SolverMiddleware( int pe_i,
     	tapa::stream<int, WINDOW_SIZE> ack("ack");
 
 		tapa::streams<int, 2> K_solver("k_solver");
-		tapa::streams<int, 3> K_sub_csr("k_sub_csr");
 		tapa::streams<int, 3> K_sub_csc("k_sub_csc");
 		tapa::streams<int, 6> N_sub("n_sub");
 		tapa::stream<float> y("y");
@@ -637,7 +658,7 @@ void SolverMiddleware( int pe_i,
 			.invoke<tapa::detach>(read_int_vec, csc_col_ptr, N_sub, N_sub, csc_col_ptr_q)
 		    .invoke<tapa::detach>(read_int_vec, csc_row_ind, K_sub_csc, K_sub_csc, csc_row_ind_q)
 			.invoke<tapa::detach>(black_hole_int, K_sub_csc)
-			.invoke<tapa::detach>(read_A_and_split, pe_i, csr_edge_list_ch, csr_edge_list_ptr, fifo_A_ch, fifo_A_ptr, spmv_val, spmv_inst)
+			.invoke<tapa::detach>(read_A_and_split, pe_i, N, csr_edge_list_ch, csr_edge_list_ptr, fifo_A_ch, fifo_A_ptr, spmv_val, spmv_inst)
 			.invoke<tapa::detach>(PEG_Xvec, pe_i, spmv_inst, spmv_val, x_q_in, x_prev, y)
 			.invoke<tapa::detach>(PEG_split, pe_i,
 				fifo_A_ch,
@@ -655,7 +676,7 @@ void SolverMiddleware( int pe_i,
 			// delete after implementation
 			.invoke<tapa::detach>(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub, K_solver, K_solver) // ?
 			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, K_solver)
-			.invoke<tapa::detach>(X_Merger, pe_i, x_prev, x_next, x_q_out);
+			.invoke<tapa::detach>(X_Merger, pe_i, N, x_prev, x_next, x_q_out, x_res);
 			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_a)
 			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_b)
 			// .invoke<tapa::detach>(black_hole_int, solver_col_ind)
@@ -680,12 +701,15 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 
 	tapa::streams<int, NUM_CH> K_csc_val("k_csc_val");
 	tapa::streams<int, NUM_CH> N_val("n_val");
-	tapa::streams<float, NUM_CH+1> x_q("x");
+	tapa::streams<float, NUM_CH+1> x_q("x_pipe");
+	tapa::stream<float> x_cyc("x_cyc");
+	tapa::streams<float, NUM_CH> x_res("x_res");
 
 	tapa::task()
 		.invoke(read_len, K_csc, N, K_csc_val, N_val)
-		.invoke<tapa::detach>(fill_zero, x_q)
-		.invoke<tapa::detach, NUM_CH>(SolverMiddleware, tapa::seq(), csr_edge_list_ch, csr_edge_list_ptr, f, csc_col_ptr, csc_row_ind, x_q, x_q, N_val, K_csc_val)
-		.invoke(write_x, x_q, x, N);
+		.invoke<tapa::detach>(x_adapter, x_cyc, x_q)
+		.invoke<tapa::detach, NUM_CH>(SolverMiddleware, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr, f, csc_col_ptr, csc_row_ind, x_q, x_q, x_res, N_val, K_csc_val)
+		.invoke<tapa::detach>(x_adapter, x_q, x_cyc)
+		.invoke(write_x, x_res, x, N);
 		//.invoke(Timer, q_done, cycle_count);	
 }
