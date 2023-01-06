@@ -669,9 +669,9 @@ void SolverMiddleware( int pe_i, int N,
 		
 		tapa::stream<ap_uint<96>> fifo_A_ch("fifo_A_ch");
 		tapa::stream<int> fifo_A_ptr("fifo_A_ptr");
-		tapa::stream<int, WINDOW_SIZE> csc_col_ptr_q("csc_col_ptr");
-		tapa::stream<int, WINDOW_SIZE> csc_row_ind_q("csc_row_ind");
-		tapa::stream<float, WINDOW_SIZE> f_q("f");
+		tapa::stream<int> csc_col_ptr_q("csc_col_ptr");
+		tapa::stream<int> csc_row_ind_q("csc_row_ind");
+		tapa::stream<float> f_q("f");
 		tapa::stream<ap_uint<96>> spmv_val("spmv_val");
 		tapa::stream<int> spmv_inst("spmv_inst");
 		tapa::stream<int, WINDOW_SIZE> solver_row_ptr_a("solver_row_ptr_a");
