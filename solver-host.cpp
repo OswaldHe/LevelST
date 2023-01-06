@@ -82,7 +82,8 @@ void generate_edgelist_for_pes(int N,
 		const aligned_vector<float>& csr_val,
 		vector<aligned_vector<ap_uint<96>>>& edge_list_ch,
 		vector<aligned_vector<int>>& edge_list_ptr){
-			for(int i = 0; i < N/WINDOW_SIZE; i++){
+			int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+			for(int i = 0; i < bound; i++){
 				vector<aligned_vector<ap_uint<96>>> tmp_edge_list(i+1);
 				for(int j = i*WINDOW_SIZE; j < (i+1)*WINDOW_SIZE && j < N; j++){
 					int start = (j == 0)? 0 : csr_row_ptr[j-1];
@@ -96,7 +97,7 @@ void generate_edgelist_for_pes(int N,
 					}
 				}
 				
-				// std::clog << "pe: " << i << std::endl;
+				//std::clog << "pe: " << i << std::endl;
 				for(int j = 0; j < i+1; j++){
 					//std::clog << tmp_edge_list[j].size() << std::endl;
 					edge_list_ptr[i%NUM_CH].push_back(tmp_edge_list[j].size());

@@ -147,13 +147,16 @@ void PEG_Xvec( int pe_i,
 	tapa::istream<ap_uint<96>>& spmv_A,
 	tapa::istream<float>& fifo_x_in,
 	tapa::ostream<float>& fifo_x_out,
-	tapa::ostream<float>& fifo_y_out){
+	tapa::ostream<float>& fifo_y_out,
+	tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
 		float local_res[WINDOW_SIZE];
 		float local_x[WINDOW_SIZE];
 
 		for(int round = 0;; round++){
+			const int num_x = N_in.read();
+			N_out.write(num_x);
 			//reset
-			for(int i = 0; i < WINDOW_SIZE; i++){
+			for(int i = 0; i < num_x; i++){
 				local_res[i] = 0.0;
 			}
 
@@ -189,7 +192,7 @@ void PEG_Xvec( int pe_i,
 			}
 
 			//write result
-			for(int i = 0; i < WINDOW_SIZE; i++){
+			for(int i = 0; i < num_x; i++){
 				fifo_y_out.write(local_res[i]);
 			}
 		}
@@ -205,6 +208,7 @@ void solve_v2(tapa::istream<int>& next,
 		tapa::istream<float>& spmv_in,
 		tapa::ostream<float>& x_out, 
 		tapa::istream<int>& N_in,
+		tapa::ostream<int>& N_out,
 		tapa::istream<int>& k_solver_in){
 	
 	float local_x[WINDOW_SIZE];
@@ -219,6 +223,7 @@ void solve_v2(tapa::istream<int>& next,
 
 for(;;){
 	const int N = N_in.read();
+	N_out.write(N);
 
 	int ia_val = 0;
 	float f_val = 0.f;
@@ -494,7 +499,7 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 		}
 }
 
-void read_A_and_split(int pe_i, int N,
+void read_A_and_split(int pe_i, int total_N,
 	tapa::async_mmap<ap_uint<96>>& csr_edge_list_ch,
 	tapa::mmap<int> csr_edge_list_ptr,
 	tapa::ostream<ap_uint<96>>& fifo_A_ch,
@@ -503,7 +508,7 @@ void read_A_and_split(int pe_i, int N,
 	tapa::ostream<int>& spmv_inst){
 		int offset = 0;
 		int offset_i = 0;
-		int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+		int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
 		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
 		for(int round = 0;round < bound;round++){
 			for(int i = 0; i < pe_i+NUM_CH*round+1; i++){
@@ -539,11 +544,12 @@ void read_A_and_split(int pe_i, int N,
 		}
 	}
 
-void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<float>& x_second, tapa::ostream<float>& x_out, tapa::ostream<float>& x_res){
+void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<float>& x_second, tapa::ostream<float>& x_out, tapa::ostream<float>& x_res, tapa::istream<int>& N_in){
 	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 	bool is_last = (level % NUM_CH == (pe_i+1)%NUM_CH);
 	int bound = (level % NUM_CH == 0) ? (level / NUM_CH) - 1 : level/NUM_CH; 
 	for(int round = 0;;round++){
+		const int num_x = N_in.read();
 		for(int i = 0; i < (pe_i+round*NUM_CH) * WINDOW_SIZE; i++){
 			if(is_last && round == bound){
 				x_res.write(x_first.read());
@@ -551,9 +557,8 @@ void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<floa
 				x_out.write(x_first.read());
 			}
 		}
-		for(int i = 0; i < WINDOW_SIZE; i++){
+		for(int i = 0; i < num_x; i++){
 			if(is_last && round == bound){
-				//if(pe_i == 0) LOG(INFO) << i;
 				x_res.write(x_second.read());
 			}else{
 				x_out.write(x_second.read());
@@ -651,7 +656,7 @@ void SolverMiddleware( int pe_i, int N,
 
 		tapa::streams<int, 2> K_solver("k_solver");
 		tapa::streams<int, 3> K_sub_csc("k_sub_csc");
-		tapa::streams<int, 6> N_sub("n_sub");
+		tapa::streams<int, 7> N_sub("n_sub");
 		tapa::stream<float> y("y");
 		tapa::stream<float> x_prev("x_prev");
 		tapa::stream<float> x_next("x_next");
@@ -664,7 +669,7 @@ void SolverMiddleware( int pe_i, int N,
 		    .invoke<tapa::detach>(read_int_vec, csc_row_ind, K_sub_csc, K_sub_csc, csc_row_ind_q)
 			.invoke<tapa::detach>(black_hole_int, K_sub_csc)
 			.invoke<tapa::detach>(read_A_and_split, pe_i, N, csr_edge_list_ch, csr_edge_list_ptr, fifo_A_ch, fifo_A_ptr, spmv_val, spmv_inst)
-			.invoke<tapa::detach>(PEG_Xvec, pe_i, spmv_inst, spmv_val, x_q_in, x_prev, y)
+			.invoke<tapa::detach>(PEG_Xvec, pe_i, spmv_inst, spmv_val, x_q_in, x_prev, y, N_sub, N_sub)
 			.invoke<tapa::detach>(PEG_split, pe_i,
 				fifo_A_ch,
 				fifo_A_ptr,
@@ -680,8 +685,8 @@ void SolverMiddleware( int pe_i, int N,
 				N_sub, N_sub)
 			// delete after implementation
 			.invoke<tapa::detach>(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub, K_solver, K_solver) // ?
-			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, K_solver)
-			.invoke<tapa::detach>(X_Merger, pe_i, N, x_prev, x_next, x_q_out, x_res);
+			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub, K_solver)
+			.invoke<tapa::detach>(X_Merger, pe_i, N, x_prev, x_next, x_q_out, x_res, N_sub);
 			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_a)
 			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_b)
 			// .invoke<tapa::detach>(black_hole_int, solver_col_ind)
