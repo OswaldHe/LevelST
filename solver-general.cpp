@@ -32,26 +32,6 @@ void read_int_vec(tapa::async_mmap<int>& mmap, tapa::istream<int>& len_in, tapa:
 	}
 }
 
-void duplicate_int_vec(tapa::async_mmap<int>& mmap, tapa::istream<int>& len_in, tapa::ostream<int>& len_out,
-                 tapa::ostream<int>& stream_a, tapa::ostream<int>& stream_b){
-	const int N = len_in.read();
-	len_out.write(N);
-  for (int i_req = 0, i_resp = 0; i_resp < N;) {
-        if(i_req < N && !mmap.read_addr.full()){
-                mmap.read_addr.try_write(i_req);
-                ++i_req;
-        }
-        if(!mmap.read_data.empty() && !stream_a.full() && !stream_b.full()){
-                int tmp;
-                mmap.read_data.try_read(tmp);
-                stream_a.try_write(tmp);
-				stream_b.try_write(tmp);
-                ++i_resp;
-        }
-  }
-
-}
-
 inline void write_float_vec(tapa::istream<float> stream, tapa::async_mmap<float>& mmap,
                  int N, int start) {
 #pragma HLS inline
@@ -97,53 +77,6 @@ void read_float_vec(tapa::async_mmap<float>& mmap, tapa::istream<int>& len_in, t
   }
 		round+=N;
 	}
-}
-
-void solve(tapa::istream<float>& a, 
-		tapa::istream<int>& ia,
-		tapa::istream<int>& ja,
-		tapa::istream<float>& f,
-		tapa::ostream<float>& x, int N){
-	
-	int read = 0;
-	int num_nn = 0;
-	int diff = 0;
-	float f_val = 0.f;
-	float a_val = 0.f;
-	int ja_val = 0;
-	int tmp = 0;
-	float local_x[WINDOW_SIZE];
-
-	bool ia_succ = false, f_succ = false, ja_succ = false, a_succ = false;
-
-	while(read < N){
-		if(!ia_succ) tmp = ia.read(ia_succ);
-		if(!f_succ) f_val = f.read(f_succ);
-		if(ia_succ && f_succ){
-		diff = tmp - num_nn;
-		num_nn = tmp;
-		for(int i = 0; i < diff;){
-			if(!ja_succ) ja_val = ja.read(ja_succ);
-			if(!a_succ) a_val = a.read(a_succ);
-			if(a_succ && ja_succ){
-				if(i != diff-1){
-					f_val -= (local_x[ja_val] * a_val);
-				} else {
-					local_x[ja_val] = (f_val / a_val);
-				}
-				a_succ = ja_succ = false;
-				i++;
-			}
-		}
-		ia_succ = f_succ = false;
-		read++;
-		}
-	}
-
-	for(int i = 0; i < N; i++){
-		x.write(local_x[i]);
-	}
-
 }
 
 //TODO: replace with serpen after modifying the read width
