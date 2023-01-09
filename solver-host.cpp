@@ -13,7 +13,7 @@ using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
 constexpr int NUM_CH = 8;
-constexpr int WINDOW_SIZE = 256;
+constexpr int WINDOW_SIZE = 1024;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -132,7 +132,7 @@ void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, align
 int main(int argc, char* argv[]){
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-	const int N = argc > 1 ? atoll(argv[1]) : 2048;
+	const int N = argc > 1 ? atoll(argv[1]) : 8192;
 	const int remainder = N % WINDOW_SIZE;
 	// int K = N*2-N/WINDOW_SIZE;
 	// if(remainder != 0) K --;
