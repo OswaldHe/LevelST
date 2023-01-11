@@ -273,6 +273,14 @@ void analyze(tapa::istream<int>& ia,
 		tapa::ostream<int>& next,
 		tapa::istream<int>& N_in, tapa::ostream<int>& N_out,
 		tapa::istream<int>& k_solver_in, tapa::ostream<int>& k_solver_out){
+		int parents[WINDOW_SIZE];
+		int local_csc_col_ptr[WINDOW_SIZE];
+		int local_csc_row_ind[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
+		int next_queue[WINDOW_SIZE];
+
+#pragma HLS array_partition variable=parents cyclic factor=4
+#pragma HLS array_partition variable=local_csc_col_ptr cyclic factor=4
+#pragma HLS array_partition variable=local_csc_row_ind cyclic factor=4
 
 		for(int round = 0;;round++){
 		const int N = N_in.read();
@@ -285,13 +293,7 @@ void analyze(tapa::istream<int>& ia,
         int ia_val = 0;
 		int csc_col_val = 0;
 		int csc_row_val = 0;
-		int parents[WINDOW_SIZE];
-		int local_csc_col_ptr[WINDOW_SIZE];
-		int local_csc_row_ind[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
-
-#pragma HLS array_partition variable=parents cyclic factor=4
-#pragma HLS array_partition variable=local_csc_col_ptr cyclic factor=4
-#pragma HLS array_partition variable=local_csc_row_ind cyclic factor=4
+		int start = 0, end = 0;
 
         bool ia_succ = false, csc_col_succ = false, csc_row_succ = false;
 
@@ -304,7 +306,7 @@ compute_parents:
                 	diff = ia_val - num_nn;
                 	num_nn = ia_val;
 					parents[i] = diff-1;
-                	if(parents[i] == 0) next.write(i);
+                	if(parents[i] == 0) next_queue[end++] = i;
                 	ia_succ = false;
                 	i++;
                 }
@@ -342,6 +344,10 @@ read_csc_col:
 compute:
 	while(processed < N){
 #pragma HLS loop_tripcount min=1 max=256
+		if(start < N && start < end){
+			next.write(next_queue[start]);
+			start++;
+		}
 		if(!ack_succ) ack_val = ack.read(ack_succ);
 	        if(ack_succ){
 			int start = (ack_val == 0) ? 0 : local_csc_col_ptr[ack_val-1];
@@ -351,7 +357,7 @@ remove_dependency:
 #pragma HLS loop_tripcount min=1 max=256
 				int index = local_csc_row_ind[i];
 				parents[index]--;
-				if(parents[index] == 0) next.write(index);
+				if(parents[index] == 0) next_queue[end++] = index;
 			}
 			ack_succ = false;
 			processed++;
@@ -374,6 +380,9 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 			tapa::ostream<int>& K_solver,
 			tapa::istream<int>& N_in,
 			tapa::ostream<int>& N_out){
+		float solver_val_arr[WINDOW_SIZE];
+		int solver_col_ind_arr[WINDOW_SIZE];
+		int solver_row_ind_arr[WINDOW_SIZE];
 
 		for(int round = 0;;round++){
 				const int N = N_in.read();
@@ -383,6 +392,7 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 				K_solver.write(K);
 				int prev_row = -1;
 				int row_ptr = 0;
+				int num_one_row = 0;
 				bool fifo_A_succ = false;
 				ap_uint<96> a_entry;
 				for(int i = 0; i < K;){
@@ -392,16 +402,22 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 						ap_uint<32> col = a_entry(63, 32);
 						ap_uint<32> val = a_entry(31, 0);
 						float val_f = tapa::bit_cast<float>(val);
-						// if(round == 1 && pe_i == 0) LOG(INFO) << "(" << (int)row << "," << (int) col << "): " << val_f;
+						//if(round == 0 && pe_i == 0) LOG(INFO) << "(" << (int)row << "," << (int) col << "): " << val_f;
 						if(tapa::bit_cast<int>(row) != prev_row){
 							if(prev_row != -1){
 								solver_row_ptr_a.write(row_ptr);
 								solver_row_ptr_b.write(row_ptr);
+								for(int k = 0; k < num_one_row; k++){
+									solver_val.write(solver_val_arr[k]);
+									solver_col_ind.write(solver_col_ind_arr[k]);
+								}
+								num_one_row = 0;
 							}
 							prev_row = tapa::bit_cast<int>(row);
 						}
-						solver_val.write(val_f);
-						solver_col_ind.write(tapa::bit_cast<int>(col)-(pe_i+NUM_CH*round)*WINDOW_SIZE);
+						solver_val_arr[num_one_row] = val_f;
+						solver_col_ind_arr[num_one_row] = tapa::bit_cast<int>(col)-(pe_i+NUM_CH*round)*WINDOW_SIZE;
+						num_one_row++;
 						row_ptr++;
 						fifo_A_succ = false;
 						i++;
@@ -409,6 +425,11 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 				}
 				solver_row_ptr_a.write(row_ptr);
 				solver_row_ptr_b.write(row_ptr);
+				for(int k = 0; k < num_one_row; k++){
+					solver_val.write(solver_val_arr[k]);
+					solver_col_ind.write(solver_col_ind_arr[k]);
+				}
+				num_one_row = 0;
 
 				int end_row = (pe_i+round*NUM_CH) * WINDOW_SIZE + N;
 
@@ -423,7 +444,7 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 							csc_row_val = csc_row_ind.read(csc_row_ind_succ);
 							if(csc_row_ind_succ){
 								if(csc_row_val < end_row) {
-									solver_row_ind.write(csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE);
+									solver_row_ind_arr[num_one_row++] = csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE;
 									solver_col_ptr_tmp ++;
 								}
 								csc_row_ind_succ = false;
@@ -431,6 +452,10 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 							}
 						}
 						solver_col_ptr.write(solver_col_ptr_tmp);
+						for(int k = 0; k < num_one_row; k++){
+							solver_row_ind.write(solver_row_ind_arr[k]);
+						}
+						num_one_row = 0;
 						prev = csc_col_val;
 						csc_col_ptr_succ = false;
 						i++;
@@ -662,7 +687,7 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::stream<int> csc_row_ind_q("csc_row_ind");
 		tapa::stream<float> f_q("f");
 		tapa::stream<ap_uint<96>> spmv_val("spmv_val");
-		tapa::stream<int> spmv_inst("spmv_inst");
+		tapa::stream<int, WINDOW_SIZE> spmv_inst("spmv_inst");
 		tapa::stream<int, WINDOW_SIZE> solver_row_ptr_a("solver_row_ptr_a");
 		tapa::stream<int, WINDOW_SIZE> solver_row_ptr_b("solver_row_ptr_b");
 		tapa::stream<int, WINDOW_SIZE> solver_col_ind("solver_col_ind");
@@ -670,8 +695,8 @@ void SolverMiddleware( int pe_i, int N,
 		/* for csc mapping search*/
 		tapa::stream<int, WINDOW_SIZE> solver_col_ptr("solver_col_ptr");
 		tapa::stream<int, WINDOW_SIZE> solver_row_ind("solver_row_ind");
-		tapa::stream<int, WINDOW_SIZE> next("next");
-    	tapa::stream<int, WINDOW_SIZE> ack("ack");
+		tapa::stream<int> next("next");
+    	tapa::stream<int> ack("ack");
 
 		tapa::streams<int, 2> K_solver("k_solver");
 		tapa::streams<int, 3> K_sub_csc("k_sub_csc");
@@ -728,13 +753,11 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 			tapa::mmap<int> K_csc,
 			tapa::mmap<int> cycle_count){
 
-	tapa::streams<int, NUM_CH> K_csc_val("k_csc_val");
+	tapa::streams<int, NUM_CH, WINDOW_SIZE> K_csc_val("k_csc_val");
 	tapa::streams<int, NUM_CH> N_val("n_val");
 	tapa::streams<float, NUM_CH+1> x_q("x_pipe");
 	tapa::streams<float, NUM_CH> x_res("x_res");
 	tapa::stream<bool> fin_write("fin_write");
-	tapa::stream<float> dump("dump");
-	tapa::stream<float> dump_res("dump_res");
 	tapa::streams<int, NUM_CH> block_id("block_id");
 	tapa::streams<float, NUM_CH> req_x("req_x");
 
