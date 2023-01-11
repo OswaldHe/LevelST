@@ -43,6 +43,7 @@ inline void write_float_vec(tapa::istream<float> stream, tapa::async_mmap<float>
 	}
 	if(!mmap.write_resp.empty()){
 		i_resp += unsigned(mmap.write_resp.read(nullptr))+1;
+		//LOG(INFO) << i_resp;
 	}
   }
 }
@@ -50,6 +51,7 @@ inline void write_float_vec(tapa::istream<float> stream, tapa::async_mmap<float>
 void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float>& mmap, int N){
 	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 	for(int i = 0; i < level/NUM_CH; i++){
+		LOG(INFO) << "process level " << i << " ...";
 		write_float_vec(x, mmap, WINDOW_SIZE*NUM_CH, WINDOW_SIZE*NUM_CH*i);
 		fin_write.write(true);
 	}
@@ -156,8 +158,7 @@ void solve_v2(tapa::istream<int>& next,
 		tapa::istream<float>& spmv_in,
 		tapa::ostream<float>& x_out, 
 		tapa::istream<int>& N_in,
-		tapa::ostream<int>& N_out,
-		tapa::istream<int>& k_solver_in){
+		tapa::ostream<int>& N_out){
 	
 	float local_x[WINDOW_SIZE];
 	float local_a[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
@@ -172,7 +173,6 @@ void solve_v2(tapa::istream<int>& next,
 for(int round = 0;; round++){
 	const int N = N_in.read();
 	N_out.write(N);
-	const int K = k_solver_in.read();
 
 	int ia_val = 0;
 	float f_val = 0.f;
@@ -182,19 +182,7 @@ for(int round = 0;; round++){
 
 	bool ia_succ = false, ja_succ = false, a_succ = false, f_succ = false, spmv_succ = false;
 
-read_ja_and_a:
-	for(int i = 0; i < K;){
-#pragma HLS loop_tripcount min=1 max=40000
-#pragma HLS pipeline II=1
-		if(!ja_succ) ja_val = ja.read(ja_succ);
-		if(!a_succ) a_val = a.read(a_succ);
-		if(ja_succ && a_succ){
-			local_a[i] = a_val;
-			local_ja[i] = ja_val;
-			a_succ = ja_succ = false;
-			i++;
-		}
-	}
+	int prev_ia = 0;
 
 read_ia_and_f:
 	for(int i = 0; i < N;) {
@@ -205,6 +193,19 @@ read_ia_and_f:
 		if(ia_succ && f_succ){
 			local_ia[i] = ia_val;
 			local_x[i] = f_val;
+			for(int j = prev_ia; j < ia_val;){
+#pragma HLS loop_tripcount min=1 max=40000
+#pragma HLS pipeline II=1
+				if(!ja_succ) ja_val = ja.read(ja_succ);
+				if(!a_succ) a_val = a.read(a_succ);
+				if(ja_succ && a_succ){
+					local_a[j] = a_val;
+					local_ja[j] = ja_val;
+					a_succ = ja_succ = false;
+					j++;
+				}
+			}
+			prev_ia = ia_val;
 			ia_succ = f_succ = false;
 			i++;
 		}
@@ -271,8 +272,7 @@ void analyze(tapa::istream<int>& ia,
 		tapa::istream<int>& csc_row_ind,
 		tapa::istream<int>& ack,
 		tapa::ostream<int>& next,
-		tapa::istream<int>& N_in, tapa::ostream<int>& N_out,
-		tapa::istream<int>& k_solver_in, tapa::ostream<int>& k_solver_out){
+		tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
 		int parents[WINDOW_SIZE];
 		int local_csc_col_ptr[WINDOW_SIZE];
 		int local_csc_row_ind[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
@@ -285,8 +285,6 @@ void analyze(tapa::istream<int>& ia,
 		for(int round = 0;;round++){
 		const int N = N_in.read();
 		N_out.write(N);
-		const int K = k_solver_in.read();
-		k_solver_out.write(K);
 
         int num_nn = 0;
         int diff = 0;
@@ -312,18 +310,8 @@ compute_parents:
                 }
         }
 
-read_csc_row:
-	for(int i = 0; i < K;) {
-#pragma HLS pipeline II=1
-#pragma HLS loop_tripcount min=1 max=40000
-		if(!csc_row_succ) csc_row_val = csc_row_ind.read(csc_row_succ);
-		if(csc_row_succ){
-				local_csc_row_ind[i] = csc_row_val;
-				csc_row_succ = false;
-				i++;
-		}
 
-	}
+	int prev_csc_col = 0;
 
 read_csc_col:
 	for(int i = 0; i < N;){
@@ -332,6 +320,18 @@ read_csc_col:
 		if(!csc_col_succ) csc_col_val = csc_col_ptr.read(csc_col_succ);
 		if(csc_col_succ){
 			local_csc_col_ptr[i] = csc_col_val;
+			for(int j = prev_csc_col; j < csc_col_val;) {
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=1 max=40000
+				if(!csc_row_succ) csc_row_val = csc_row_ind.read(csc_row_succ);
+				if(csc_row_succ){
+						local_csc_row_ind[j] = csc_row_val;
+						csc_row_succ = false;
+						j++;
+				}
+
+			}
+			prev_csc_col = csc_col_val;
 			csc_col_succ = false;
 			i++;
 		}
@@ -377,7 +377,6 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 			/* for csc mapping search*/
 			tapa::ostream<int>& solver_col_ptr,
 			tapa::ostream<int>& solver_row_ind,
-			tapa::ostream<int>& K_solver,
 			tapa::istream<int>& N_in,
 			tapa::ostream<int>& N_out){
 		float solver_val_arr[WINDOW_SIZE];
@@ -389,7 +388,6 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 				N_out.write(N);
 
 				const int K = fifo_A_ptr.read();
-				K_solver.write(K);
 				int prev_row = -1;
 				int row_ptr = 0;
 				int num_one_row = 0;
@@ -688,17 +686,16 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::stream<float> f_q("f");
 		tapa::stream<ap_uint<96>> spmv_val("spmv_val");
 		tapa::stream<int, WINDOW_SIZE> spmv_inst("spmv_inst");
-		tapa::stream<int, WINDOW_SIZE> solver_row_ptr_a("solver_row_ptr_a");
-		tapa::stream<int, WINDOW_SIZE> solver_row_ptr_b("solver_row_ptr_b");
-		tapa::stream<int, WINDOW_SIZE> solver_col_ind("solver_col_ind");
-		tapa::stream<float, WINDOW_SIZE> solver_val("solver_val");
+		tapa::stream<int> solver_row_ptr_a("solver_row_ptr_a");
+		tapa::stream<int> solver_row_ptr_b("solver_row_ptr_b");
+		tapa::stream<int> solver_col_ind("solver_col_ind");
+		tapa::stream<float> solver_val("solver_val");
 		/* for csc mapping search*/
-		tapa::stream<int, WINDOW_SIZE> solver_col_ptr("solver_col_ptr");
-		tapa::stream<int, WINDOW_SIZE> solver_row_ind("solver_row_ind");
+		tapa::stream<int> solver_col_ptr("solver_col_ptr");
+		tapa::stream<int> solver_row_ind("solver_row_ind");
 		tapa::stream<int> next("next");
     	tapa::stream<int> ack("ack");
 
-		tapa::streams<int, 2> K_solver("k_solver");
 		tapa::streams<int, 3> K_sub_csc("k_sub_csc");
 		tapa::streams<int, 7> N_sub("n_sub");
 		tapa::stream<float> y("y");
@@ -725,11 +722,10 @@ void SolverMiddleware( int pe_i, int N,
 				solver_val,
 				solver_col_ptr,
 				solver_row_ind,
-				K_solver,
 				N_sub, N_sub)
 			// delete after implementation
-			.invoke<tapa::detach>(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub, K_solver, K_solver) // ?
-			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub, K_solver)
+			.invoke<tapa::detach>(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub) // ?
+			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub)
 			.invoke<tapa::detach>(X_Merger, pe_i, N, x_prev, x_next, x_q_out, x_res, N_sub);
 			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_a)
 			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_b)
