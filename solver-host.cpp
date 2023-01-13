@@ -24,7 +24,7 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<int, NUM_CH> csc_row_ind, 
 			tapa::mmaps<float, NUM_CH> f, 
 			tapa::mmap<float> x, 
-			int N, tapa::mmap<int> K_csc, tapa::mmap<int> cycle_count);
+			int N, tapa::mmap<int> K_csc);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
 
@@ -240,7 +240,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga),
-                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_csc), tapa::write_only_mmap<int>(cycle));
+                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_csc));
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
 	

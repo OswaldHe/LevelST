@@ -1,7 +1,7 @@
 #include <ap_int.h>
 #include <cstdint>
 #include <tapa.h>
-#include <glog/logging.h>
+// #include <glog/logging.h>
 
 constexpr int WINDOW_SIZE = 1024;
 constexpr int NUM_CH = 8;
@@ -32,27 +32,23 @@ void read_int_vec(tapa::async_mmap<int>& mmap, tapa::istream<int>& len_in, tapa:
 	}
 }
 
-inline void write_float_vec(tapa::istream<float> stream, tapa::async_mmap<float>& mmap,
-                 int N, int start) {
-#pragma HLS inline
-  for(int i_req = 0, i_resp = 0; i_resp < N;){
-  	if(i_req < N && !stream.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
-		mmap.write_addr.try_write(i_req + start);
-		mmap.write_data.try_write(stream.read(nullptr));
-		++i_req;
-	}
-	if(!mmap.write_resp.empty()){
-		i_resp += unsigned(mmap.write_resp.read(nullptr))+1;
-		//LOG(INFO) << i_resp;
-	}
-  }
-}
-
 void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float>& mmap, int N){
 	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 	for(int i = 0; i < level/NUM_CH; i++){
-		LOG(INFO) << "process level " << i << " ...";
-		write_float_vec(x, mmap, WINDOW_SIZE*NUM_CH, WINDOW_SIZE*NUM_CH*i);
+		//LOG(INFO) << "process level " << i << " ...";
+		int start = WINDOW_SIZE*NUM_CH*i;
+		int N = WINDOW_SIZE*NUM_CH;
+		for(int i_req = 0, i_resp = 0; i_resp < N;){
+			if(i_req < N && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
+				mmap.write_addr.try_write(i_req + start);
+				mmap.write_data.try_write(x.read(nullptr));
+				++i_req;
+			}
+			if(!mmap.write_resp.empty()){
+				i_resp += unsigned(mmap.write_resp.read(nullptr))+1;
+				//LOG(INFO) << i_resp;
+			}
+		}
 		fin_write.write(true);
 	}
 }
@@ -535,10 +531,14 @@ void read_len( tapa::mmap<int> K_csc,
 	tapa::ostreams<int, NUM_CH>& K_csc_val, 
 	tapa::ostreams<int, NUM_CH>& N_val){
 	int bound = (N%WINDOW_SIZE == 0) ? N/WINDOW_SIZE : N/WINDOW_SIZE+1;
-	for(int i = 0; i < bound; i++){
+	for(int i = 0; i < bound;){
+#pragma HLS pipeline II=1
 		int len = ((N-i*WINDOW_SIZE) < WINDOW_SIZE) ? N%WINDOW_SIZE : WINDOW_SIZE;
-		K_csc_val[i%NUM_CH].write(K_csc[i]);
-		N_val[i%NUM_CH].write(len);
+		if(!K_csc_val[i%NUM_CH].full() && !N_val[i%NUM_CH].full()){
+			K_csc_val[i%NUM_CH].try_write(K_csc[i]);
+			N_val[i%NUM_CH].try_write(len);
+			i++;
+		}
 	}
 }
 
@@ -609,7 +609,7 @@ void request_X(tapa::async_mmap<float>& mmap, tapa::istreams<int, NUM_CH>& block
 		for(int i = 0; i < NUM_CH; i++){
 			block = block_id[i].read(read_succ);
 			if(read_succ){
-				if(cache_index[block%4] = block){
+				if(cache_index[block%4] == block){
 					// read from bram
 					for(int j = 0; j < WINDOW_SIZE;){
 						if(!fifo_x_out[i].full()){
@@ -648,7 +648,16 @@ void write_X_residue(tapa::istreams<float, NUM_CH>& x_res, tapa::async_mmap<floa
 	int last = ((level%NUM_CH)+7)%NUM_CH;
 	int dump_size = N - (N %(WINDOW_SIZE*NUM_CH));
 	if(dump_size != N){
-		write_float_vec(x_res[last], x, N-dump_size, dump_size);
+		for(int i_req = 0, i_resp = 0; i_resp < N-dump_size;){
+			if(i_req < N && !x_res[last].empty() && !x.write_addr.full() && !x.write_data.full()){
+				x.write_addr.try_write(i_req + dump_size);
+				x.write_data.try_write(x_res[last].read(nullptr));
+				++i_req;
+			}
+			if(!x.write_resp.empty()){
+				i_resp += unsigned(x.write_resp.read(nullptr))+1;
+			}
+		}
 	}
 }
 
@@ -685,7 +694,7 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::stream<int> csc_row_ind_q("csc_row_ind");
 		tapa::stream<float> f_q("f");
 		tapa::stream<ap_uint<96>> spmv_val("spmv_val");
-		tapa::stream<int, WINDOW_SIZE> spmv_inst("spmv_inst");
+		tapa::stream<int> spmv_inst("spmv_inst");
 		tapa::stream<int> solver_row_ptr_a("solver_row_ptr_a");
 		tapa::stream<int> solver_row_ptr_b("solver_row_ptr_b");
 		tapa::stream<int> solver_col_ind("solver_col_ind");
@@ -696,7 +705,7 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::stream<int> next("next");
     	tapa::stream<int> ack("ack");
 
-		tapa::streams<int, 3> K_sub_csc("k_sub_csc");
+		tapa::stream<int> K_sub_csc("k_sub_csc");
 		tapa::streams<int, 7> N_sub("n_sub");
 		tapa::stream<float> y("y");
 		tapa::stream<float> x_prev("x_prev");
@@ -704,10 +713,9 @@ void SolverMiddleware( int pe_i, int N,
 
 		tapa::task()
 			.invoke<tapa::detach>(broadcast, N_val, N_sub)
-			.invoke<tapa::detach>(broadcast, K_csc_val, K_sub_csc)
 			.invoke<tapa::detach>(read_float_vec, f, N_sub, N_sub, f_q)
 			.invoke<tapa::detach>(read_int_vec, csc_col_ptr, N_sub, N_sub, csc_col_ptr_q)
-		    .invoke<tapa::detach>(read_int_vec, csc_row_ind, K_sub_csc, K_sub_csc, csc_row_ind_q)
+		    .invoke<tapa::detach>(read_int_vec, csc_row_ind, K_csc_val, K_sub_csc, csc_row_ind_q)
 			.invoke<tapa::detach>(black_hole_int, K_sub_csc)
 			.invoke<tapa::detach>(read_A_and_split, pe_i, N, csr_edge_list_ch, csr_edge_list_ptr, fifo_A_ch, fifo_A_ptr, spmv_val, spmv_inst)
 			.invoke<tapa::detach>(PEG_Xvec, pe_i, spmv_inst, spmv_val, x_q_in, x_prev, y, N_sub, N_sub, block_id, req_x)
@@ -746,10 +754,9 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<float, NUM_CH> f, 
 			tapa::mmap<float> x, 
 			int N, // # of dimension
-			tapa::mmap<int> K_csc,
-			tapa::mmap<int> cycle_count){
+			tapa::mmap<int> K_csc){
 
-	tapa::streams<int, NUM_CH, WINDOW_SIZE> K_csc_val("k_csc_val");
+	tapa::streams<int, NUM_CH, 32> K_csc_val("k_csc_val");
 	tapa::streams<int, NUM_CH> N_val("n_val");
 	tapa::streams<float, NUM_CH+1> x_q("x_pipe");
 	tapa::streams<float, NUM_CH> x_res("x_res");
