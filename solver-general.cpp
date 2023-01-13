@@ -526,19 +526,25 @@ void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<floa
 	}
 }
 
-void read_len( tapa::mmap<int> K_csc, 
+void read_len( tapa::async_mmap<int>& K_csc, 
 	int N, 
 	tapa::ostreams<int, NUM_CH>& K_csc_val, 
 	tapa::ostreams<int, NUM_CH>& N_val){
 	int bound = (N%WINDOW_SIZE == 0) ? N/WINDOW_SIZE : N/WINDOW_SIZE+1;
-	for(int i = 0; i < bound;){
+	for(int i_req = 0, i_resp = 0; i_resp < bound;){
 #pragma HLS pipeline II=1
-		int len = ((N-i*WINDOW_SIZE) < WINDOW_SIZE) ? N%WINDOW_SIZE : WINDOW_SIZE;
-		if(!K_csc_val[i%NUM_CH].full() && !N_val[i%NUM_CH].full()){
-			K_csc_val[i%NUM_CH].try_write(K_csc[i]);
-			N_val[i%NUM_CH].try_write(len);
-			i++;
-		}
+		int len = ((N-i_resp*WINDOW_SIZE) < WINDOW_SIZE) ? N%WINDOW_SIZE : WINDOW_SIZE;
+		if(i_req < bound && !K_csc.read_addr.full()){
+                K_csc.read_addr.try_write(i_req);
+                ++i_req;
+        }
+        if(!K_csc.read_data.empty() && !K_csc_val[i_resp%NUM_CH].full() && !N_val[i_resp%NUM_CH].full()){
+                int tmp;
+				K_csc.read_data.try_read(tmp);
+                K_csc_val[i_resp%NUM_CH].try_write(tmp);
+				N_val[i_resp%NUM_CH].try_write(len);
+                ++i_resp;
+        }
 	}
 }
 
@@ -706,14 +712,13 @@ void SolverMiddleware( int pe_i, int N,
     	tapa::stream<int> ack("ack");
 
 		tapa::stream<int> K_sub_csc("k_sub_csc");
-		tapa::streams<int, 7> N_sub("n_sub");
+		tapa::streams<int, 6> N_sub("n_sub");
 		tapa::stream<float> y("y");
 		tapa::stream<float> x_prev("x_prev");
 		tapa::stream<float> x_next("x_next");
 
 		tapa::task()
-			.invoke<tapa::detach>(broadcast, N_val, N_sub)
-			.invoke<tapa::detach>(read_float_vec, f, N_sub, N_sub, f_q)
+			.invoke<tapa::detach>(read_float_vec, f, N_val, N_sub, f_q)
 			.invoke<tapa::detach>(read_int_vec, csc_col_ptr, N_sub, N_sub, csc_col_ptr_q)
 		    .invoke<tapa::detach>(read_int_vec, csc_row_ind, K_csc_val, K_sub_csc, csc_row_ind_q)
 			.invoke<tapa::detach>(black_hole_int, K_sub_csc)
@@ -756,7 +761,7 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 			int N, // # of dimension
 			tapa::mmap<int> K_csc){
 
-	tapa::streams<int, NUM_CH, 32> K_csc_val("k_csc_val");
+	tapa::streams<int, NUM_CH> K_csc_val("k_csc_val");
 	tapa::streams<int, NUM_CH> N_val("n_val");
 	tapa::streams<float, NUM_CH+1> x_q("x_pipe");
 	tapa::streams<float, NUM_CH> x_res("x_res");
@@ -765,7 +770,7 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<float, NUM_CH> req_x("req_x");
 
 	tapa::task()
-		.invoke(read_len, K_csc, N, K_csc_val, N_val)
+		.invoke<tapa::detach>(read_len, K_csc, N, K_csc_val, N_val)
 		.invoke<tapa::detach>(fill_zero, x_q)
 		.invoke<tapa::detach>(request_X, x, block_id, req_x, fin_write)
 		.invoke<tapa::detach, NUM_CH>(SolverMiddleware, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr, f, csc_col_ptr, csc_row_ind, x_q, x_q, x_res, N_val, K_csc_val, block_id, req_x)

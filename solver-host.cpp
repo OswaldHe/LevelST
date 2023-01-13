@@ -57,22 +57,24 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 	}
 
 	std::vector<int> col_nz(N, 0);
+	int bound = (N%WINDOW_SIZE == 0) ? N/WINDOW_SIZE : N/WINDOW_SIZE+1;
+	std::vector<int> k_count(bound, 0);
 	for(int i = 0; i < N; i++){
 		for(int j = (i==0)?0:csr_row_ptr[i-1]; j < csr_row_ptr[i]; j++){
 			int c = csr_col_ind[j];
 			int r = i;
 			float val = csr_val[j];
-
 			int pos = ((c == 0) ? 0 : csc_col_ptr[c-1]) + col_nz[c];
 			csc_val[pos] = val;
 			csc_row_ind[pos] = r;
 			csc_row_ind_fpga[(c/WINDOW_SIZE)%NUM_CH].push_back(r); // ?
+			k_count[c/WINDOW_SIZE]++;
 			col_nz[c]++;
 		}
 	}
 
-	for(int i = 0; i < NUM_CH; i++){
-		K_csc.push_back(csc_row_ind_fpga[i].size());
+	for(int i = 0; i < bound; i++){
+		K_csc.push_back(k_count[i]);
 	}
 }
 
