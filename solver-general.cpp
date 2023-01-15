@@ -163,6 +163,9 @@ void solve_v2(tapa::istream<int>& next,
 	float cyclic_aggregate[16];
 
 #pragma HLS bind_storage type=ram_2p impl=bram latency=1
+#pragma HLS array_partition cyclic variable=local_x factor=16
+#pragma HLS array_partition cyclic variable=local_a factor=16
+#pragma HLS array_partition cyclic variable=local_ia factor=4
 #pragma HLS array_partition cyclic variable=local_ja factor=16
 #pragma HLS array_partition complete variable=cyclic_aggregate
 
@@ -239,7 +242,8 @@ accumulate:
 #pragma HLS dependence variable=cyclic_aggregate type=inter distance=16 true
 #pragma HLS pipeline II=1
 				int c = local_ja[i];
-				cyclic_aggregate[i%16] += (local_x[c] * local_a[i]);
+				float mult_tmp = local_x[c] * local_a[i];
+				cyclic_aggregate[i%16] += mult_tmp;
 			}
 aggregate:
 			for(int i = 1; i < 16; i++){
@@ -277,13 +281,13 @@ void analyze(tapa::istream<int>& ia,
 #pragma HLS array_partition variable=parents cyclic factor=4
 #pragma HLS array_partition variable=local_csc_col_ptr cyclic factor=4
 #pragma HLS array_partition variable=local_csc_row_ind cyclic factor=4
+#pragma HLS array_partition variable=next_queue cyclic factor=4
 
 		for(int round = 0;;round++){
 		const int N = N_in.read();
 		N_out.write(N);
 
         int num_nn = 0;
-        int diff = 0;
         int ia_val = 0;
 		int csc_col_val = 0;
 		int csc_row_val = 0;
@@ -297,9 +301,8 @@ compute_parents:
 #pragma HLS loop_tripcount min=1 max=256
                 if(!ia_succ) ia_val = ia.read(ia_succ);
                 if(ia_succ){
-                	diff = ia_val - num_nn;
+                	parents[i] = ia_val - num_nn - 1;
                 	num_nn = ia_val;
-					parents[i] = diff-1;
                 	if(parents[i] == 0) next_queue[end++] = i;
                 	ia_succ = false;
                 	i++;
@@ -340,9 +343,8 @@ read_csc_col:
 compute:
 	while(processed < N){
 #pragma HLS loop_tripcount min=1 max=256
-		if(start < N && start < end){
-			next.write(next_queue[start]);
-			start++;
+		if(start < N && start < end && !next.full()){
+			next.try_write(next_queue[start++]);
 		}
 		if(!ack_succ) ack_val = ack.read(ack_succ);
 	        if(ack_succ){
@@ -469,7 +471,9 @@ void read_A_and_split(int pe_i, int total_N,
 		int offset_i = 0;
 		int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
 		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
+round:
 		for(int round = 0;round < bound;round++){
+traverse_block:
 			for(int i = 0; i < pe_i+NUM_CH*round+1; i++){
 				const int N = csr_edge_list_ptr[i+offset_i];
 				if(i == pe_i+NUM_CH*round) {
@@ -478,6 +482,7 @@ void read_A_and_split(int pe_i, int total_N,
 				else {
 					spmv_inst.write(N);
 				}
+split:
 				for (int i_req = 0, i_resp = 0; i_resp < N;) {
 					if(i_req < N && !csr_edge_list_ch.read_addr.full()){
 							csr_edge_list_ch.read_addr.try_write(i_req+offset);
@@ -595,31 +600,48 @@ void read_X(tapa::async_mmap<float>& mmap, tapa::istream<bool>& fin_write, tapa:
 }
 
 void fill_zero(tapa::ostream<float>& fifo_out){
-	for(;;){fifo_out.write(0.0);}
+	for(;;){
+#pragma HLS pipeline II=1
+		fifo_out.write(0.0);
+	}
 }
 
 void request_X(tapa::async_mmap<float>& mmap, tapa::istreams<int, NUM_CH>& block_id, tapa::ostreams<float, NUM_CH>& fifo_x_out, tapa::istream<bool>& fin_write){
 	float local_cache_x[WINDOW_SIZE*4];
 	int cache_index[4];
-	int level_done = 0;
 
-	for(int i = 0; i < 4; i++) cache_index[i] = -1;
+#pragma HLS array_partition variable=local_cache_x cyclic factor=8
+#pragma HLS array_partition variable=cache_index complete
 
 	int block = 0;
 	bool read_succ = false;
+	int level_done = 0;
+
+init_cache_tag:
+	for(int i = 0; i < 4; i++) {
+#pragma HLS pipeline II=1
+		cache_index[i] = -1;
+	}
+
+handle_request:
 	for(;;){
 		if(!fin_write.empty()){
 			fin_write.read(nullptr);
 			level_done++;
 		}
+scan:
 		for(int i = 0; i < NUM_CH; i++){
 			block = block_id[i].read(read_succ);
 			if(read_succ){
 				if(cache_index[block%4] == block){
 					// read from bram
+load_cache:
 					for(int j = 0; j < WINDOW_SIZE;){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=0 max=1024
 						if(!fifo_x_out[i].full()){
-							fifo_x_out[i].try_write(local_cache_x[(block%4)*WINDOW_SIZE+j]);
+							float x_f = local_cache_x[(block%4)*WINDOW_SIZE+j];
+							fifo_x_out[i].try_write(x_f);
 							j++;
 						}
 					}
@@ -629,7 +651,10 @@ void request_X(tapa::async_mmap<float>& mmap, tapa::istreams<int, NUM_CH>& block
 						level_done++;
 					}
 					cache_index[block%4] = block;
+load_x_to_cache:
 					for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE;){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=0 max=1024
 						if(i_req < WINDOW_SIZE && !mmap.read_addr.full()){
 							mmap.read_addr.try_write(i_req+block*WINDOW_SIZE);
 							++i_req;
@@ -740,16 +765,6 @@ void SolverMiddleware( int pe_i, int N,
 			.invoke<tapa::detach>(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub) // ?
 			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub)
 			.invoke<tapa::detach>(X_Merger, pe_i, N, x_prev, x_next, x_q_out, x_res, N_sub);
-			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_a)
-			// .invoke<tapa::detach>(black_hole_int, solver_row_ptr_b)
-			// .invoke<tapa::detach>(black_hole_int, solver_col_ind)
-			// .invoke<tapa::detach>(black_hole_float, solver_val)
-			// .invoke<tapa::detach>(black_hole_int, solver_col_ptr)
-			// .invoke<tapa::detach>(black_hole_int, solver_row_ind)
-			// .invoke<tapa::detach>(black_hole_float, f_q);
-			
-			// .invoke(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N, K_solver_val, K_solver_val)
-			// .invoke(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, x_q, N, K_solver_val);
 	}
 
 void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
@@ -776,7 +791,4 @@ void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::detach, NUM_CH>(SolverMiddleware, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr, f, csc_col_ptr, csc_row_ind, x_q, x_q, x_res, N_val, K_csc_val, block_id, req_x)
 		.invoke<tapa::join>(write_x, x_q, fin_write, x, N)
 		.invoke<tapa::join>(write_X_residue, x_res, x, N);
-		// .invoke<tapa::detach>(black_hole_float, dump)
-		// .invoke<tapa::detach>(black_hole_float, dump_res);
-		//.invoke(Timer, q_done, cycle_count);	
 }
