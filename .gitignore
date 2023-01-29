@@ -5,3 +5,6 @@ solver.xilinx_u280_xdma_201920_3.hw.xo.tapa/
 *.xclbin
 solver.xilinx_u280_xdma_201920_3*
 trig-solver
+vitis_run_hw/
+vitis_run_hw_emu/
+.ipcache/

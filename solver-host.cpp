@@ -12,8 +12,8 @@ using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
-constexpr int NUM_CH = 8;
-constexpr int WINDOW_SIZE = 1024;
+constexpr int NUM_CH = 6;
+constexpr int WINDOW_SIZE = 512;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -205,6 +205,24 @@ int main(int argc, char* argv[]){
 	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
 	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
 	//std::clog << csc_row_ind_fpga[0][511] <<std::endl;
+	for(int i = 0; i < NUM_CH; i++){
+		if(edge_list_ch[i].size() == 0){
+			ap_uint<96> a = 0;
+			edge_list_ch[i].push_back(a);
+		}
+		if(edge_list_ptr[i].size() == 0){
+			edge_list_ptr[i].push_back(0);
+		}
+		if(csc_col_ptr_fpga[i].size() == 0){
+			csc_col_ptr_fpga[i].push_back(0);
+		}
+		if(csc_row_ind_fpga[i].size() == 0){
+			csc_row_ind_fpga[i].push_back(0);
+		}
+		if(f_fpga[i].size() == 0){
+			f_fpga[i].push_back(0.0);
+		}
+	}
 
 	//triangular solver in cpu
 	float expected_x[N];
@@ -242,7 +260,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga),
-                        tapa::write_only_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_csc));
+                        tapa::read_write_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_csc));
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
 	
