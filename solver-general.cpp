@@ -35,20 +35,21 @@ void black_hole_ap_uint(tapa::istream<ap_uint<96>>& fifo_in){
 void read_int_vec(tapa::async_mmap<int>& mmap, tapa::istream<int>& len_in, tapa::ostream<int>& len_out,
                  tapa::ostream<int>& stream) {
 	for(int round = 0;;){
+#pragma HLS loop_flatten off
 		const int N = len_in.read();
 		len_out.write(N);
-  for (int i_req = 0, i_resp = 0; i_resp < N;) {
-        if(i_req < N && !mmap.read_addr.full()){
-                mmap.read_addr.try_write(i_req+round);
-                ++i_req;
-        }
-        if(!mmap.read_data.empty() && !stream.full()){
-                int tmp;
-                mmap.read_data.try_read(tmp);
-				stream.try_write(tmp);
-                ++i_resp;
-        }
-  }
+		for (int i_req = 0, i_resp = 0; i_resp < N;) {
+				if(i_req < N && !mmap.read_addr.full()){
+						mmap.read_addr.try_write(i_req+round);
+						++i_req;
+				}
+				if(!mmap.read_data.empty() && !stream.full()){
+						int tmp;
+						mmap.read_data.try_read(tmp);
+						stream.try_write(tmp);
+						++i_resp;
+				}
+		}
 		round += N;
 	}
 }
@@ -91,20 +92,21 @@ void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::asyn
 void read_float_vec(tapa::async_mmap<float>& mmap, tapa::istream<int>& len_in, tapa::ostream<int>& len_out,
                  tapa::ostream<float>& stream) {
 	for(int round = 0;;){
+#pragma HLS loop_flatten off
 		const int N = len_in.read();
 		len_out.write(N);
-  for (int i_req = 0, i_resp = 0; i_resp < N;) {
-        if(i_req < N && !mmap.read_addr.full()){
-                mmap.read_addr.try_write(i_req+round);
-                ++i_req;
-        }
-        if(!mmap.read_data.empty() && !stream.full()){
-                float tmp;
-                mmap.read_data.try_read(tmp);
-                stream.try_write(tmp);
-                ++i_resp;
-        }
-  }
+		for (int i_req = 0, i_resp = 0; i_resp < N;) {
+				if(i_req < N && !mmap.read_addr.full()){
+						mmap.read_addr.try_write(i_req+round);
+						++i_req;
+				}
+				if(!mmap.read_data.empty() && !stream.full()){
+						float tmp;
+						mmap.read_data.try_read(tmp);
+						stream.try_write(tmp);
+						++i_resp;
+				}
+		}
 		round+=N;
 	}
 }
@@ -118,15 +120,21 @@ void PEG_Xvec( int pe_i,
 	tapa::ostream<float>& fifo_y_out,
 	tapa::istream<int>& N_in, tapa::ostream<int>& N_out,
 	tapa::ostream<int>& block_id, tapa::istream<float>& req_x){
-		float local_res[WINDOW_SIZE];
-		float local_x[WINDOW_SIZE];
 
 		for(int round = 0;; round++){
+#pragma HLS loop_flatten off
 			const int num_x = N_in.read();
 			N_out.write(num_x);
+
+			float local_res[WINDOW_SIZE];
+			float local_x[WINDOW_SIZE];
+
 			//reset
 			for(int i = 0; i < num_x; i++){
 				local_res[i] = 0.0;
+			}
+			for(int i = 0; i < WINDOW_SIZE; i++){
+				local_x[i] = 0.0;
 			}
 
 			for(int ite = 0; ite < pe_i+round*NUM_CH; ite++){
@@ -190,7 +198,12 @@ void solve_v2(tapa::istream<int>& next,
 		tapa::ostream<float>& x_out, 
 		tapa::istream<int>& N_in,
 		tapa::ostream<int>& N_out){
-	
+
+for(int round = 0;; round++){
+#pragma HLS loop_flatten off
+	const int N = N_in.read();
+	N_out.write(N);
+
 	float local_x[WINDOW_SIZE];
 	float local_a[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
 	int local_ia[WINDOW_SIZE];
@@ -201,12 +214,8 @@ void solve_v2(tapa::istream<int>& next,
 #pragma HLS array_partition cyclic variable=local_x factor=4
 #pragma HLS array_partition cyclic variable=local_a factor=4
 #pragma HLS array_partition cyclic variable=local_ia factor=4
-#pragma HLS array_partition cyclic variable=local_ja factor=4
+#pragma HLS array_partition cyclic variable=local_ja factor=12
 #pragma HLS array_partition complete variable=cyclic_aggregate
-
-for(int round = 0;; round++){
-	const int N = N_in.read();
-	N_out.write(N);
 
 	int ia_val = 0;
 	float f_val = 0.f;
@@ -309,6 +318,12 @@ void analyze(tapa::istream<int>& ia,
 		tapa::istream<int>& ack,
 		tapa::ostream<int>& next,
 		tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
+
+		for(int round = 0;;round++){
+#pragma HLS loop_flatten off
+		const int N = N_in.read();
+		N_out.write(N);
+
 		int parents[WINDOW_SIZE];
 		int local_csc_col_ptr[WINDOW_SIZE];
 		int local_csc_row_ind[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
@@ -319,10 +334,6 @@ void analyze(tapa::istream<int>& ia,
 #pragma HLS array_partition variable=local_csc_col_ptr cyclic factor=4
 #pragma HLS array_partition variable=local_csc_row_ind cyclic factor=4
 #pragma HLS array_partition variable=next_queue cyclic factor=4
-
-		for(int round = 0;;round++){
-		const int N = N_in.read();
-		N_out.write(N);
 
         int num_nn = 0;
         int ia_val = 0;
@@ -414,13 +425,15 @@ void PEG_split(int pe_i, tapa::istream<ap_uint<96>>& fifo_A_ch,
 			tapa::ostream<int>& solver_row_ind,
 			tapa::istream<int>& N_in,
 			tapa::ostream<int>& N_out){
-		float solver_val_arr[WINDOW_SIZE];
-		int solver_col_ind_arr[WINDOW_SIZE];
-		int solver_row_ind_arr[WINDOW_SIZE];
 
 		for(int round = 0;;round++){
+#pragma HLS loop_flatten off
 				const int N = N_in.read();
 				N_out.write(N);
+
+				float solver_val_arr[WINDOW_SIZE];
+				int solver_col_ind_arr[WINDOW_SIZE];
+				int solver_row_ind_arr[WINDOW_SIZE];
 
 				const int K = fifo_A_ptr.read();
 				int prev_row = -1;
@@ -510,6 +523,7 @@ void read_A_and_split(int pe_i, int total_N,
 		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
 round:
 		for(int round = 0;round < bound;round++){
+#pragma HLS loop_flatten off
 traverse_block:
 			for(int i = 0; i < pe_i+NUM_CH*round+1; i++){
 				const int N = csr_edge_list_ptr[i+offset_i];
@@ -549,6 +563,7 @@ void X_Merger(int pe_i, int N, tapa::istream<float>& x_first, tapa::istream<floa
 	int level = N / (WINDOW_SIZE * NUM_CH);
 	int last = (N % (WINDOW_SIZE * NUM_CH))%WINDOW_SIZE == 0 ? (N % (WINDOW_SIZE * NUM_CH))/WINDOW_SIZE - 1:(N % (WINDOW_SIZE * NUM_CH))/WINDOW_SIZE;
 	for(int round = 0;;round++){
+#pragma HLS loop_flatten off
 		if(round == level && pe_i > last){
 			for(int i = 0; i < N % (WINDOW_SIZE * NUM_CH); i++){
 				x_out.write(x_bypass.read());
@@ -574,6 +589,7 @@ void X_bypass(int pe_i, int N, tapa::istream<float>& fifo_x_in, tapa::ostream<fl
 		}
 	}else {
 		for(int round = 0;;round++){
+#pragma HLS loop_flatten off
 			if(round < level || pe_i <= last){
 				for(int j = 0; j < WINDOW_SIZE*pe_i; j++){
 					fifo_x_out.write(fifo_x_in.read());
@@ -662,6 +678,7 @@ init_cache_tag:
 
 handle_request:
 	for(;;){
+#pragma HLS loop_flatten off
 		if(!fin_write.empty()){
 			fin_write.read(nullptr);
 			level_done++;
