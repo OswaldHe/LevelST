@@ -210,7 +210,7 @@ void solve_v2(tapa::istream<int>& next,
 		tapa::istream<int>& N_in,
 		tapa::ostream<int>& N_out){
 
-for(int round = 0;; round++){
+for(;;){
 #pragma HLS loop_flatten off
 	const int N = N_in.read();
 	N_out.write(N);
@@ -330,7 +330,7 @@ void analyze(tapa::istream<int>& ia,
 		tapa::ostream<int>& next,
 		tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
 
-		for(int round = 0;;round++){
+	for(;;){
 #pragma HLS loop_flatten off
 		const int N = N_in.read();
 		N_out.write(N);
@@ -362,7 +362,10 @@ compute_parents:
                 if(ia_succ){
                 	parents[i] = ia_val - num_nn - 1;
                 	num_nn = ia_val;
-                	if(parents[i] == 0) next_queue[end++] = i;
+                	if(parents[i] == 0) {
+						next_queue[end] = i;
+						end++;
+					}
                 	ia_succ = false;
                 	i++;
                 }
@@ -402,11 +405,11 @@ read_csc_col:
 compute:
 	while(processed < N){
 #pragma HLS loop_tripcount min=1 max=256
-		if(start < N && start < end && !next.full()){
+		if(start < end && !next.full()){
 			next.try_write(next_queue[start++]);
 		}
 		if(!ack_succ) ack_val = ack.read(ack_succ);
-	        if(ack_succ){
+	    if(ack_succ){
 			int start = (ack_val == 0) ? 0 : local_csc_col_ptr[ack_val-1];
 remove_dependency:
 			for(int i = start; i < local_csc_col_ptr[ack_val]; i++){
@@ -489,7 +492,6 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 					solver_val.write(solver_val_arr[k]);
 					solver_col_ind.write(solver_col_ind_arr[k]);
 				}
-				num_one_row = 0;
 
 				int end_row = (pe_i+round*NUM_CH) * WINDOW_SIZE + N;
 
@@ -497,6 +499,7 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 				int prev = 0;
 				bool csc_col_ptr_succ = false, csc_row_ind_succ = false;
 				int solver_col_ptr_tmp = 0;
+				int num_one_col = 0;
 				for(int i = 0; i < N;){
 					csc_col_val = csc_col_ptr.read(csc_col_ptr_succ);
 					if(csc_col_ptr_succ) {
@@ -504,7 +507,8 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 							csc_row_val = csc_row_ind.read(csc_row_ind_succ);
 							if(csc_row_ind_succ){
 								if(csc_row_val < end_row) {
-									solver_row_ind_arr[num_one_row++] = csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE;
+									solver_row_ind_arr[num_one_col] = csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE;
+									num_one_col ++;
 									solver_col_ptr_tmp ++;
 								}
 								csc_row_ind_succ = false;
@@ -512,10 +516,10 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 							}
 						}
 						solver_col_ptr.write(solver_col_ptr_tmp);
-						for(int k = 0; k < num_one_row; k++){
+						for(int k = 0; k < num_one_col; k++){
 							solver_row_ind.write(solver_row_ind_arr[k]);
 						}
-						num_one_row = 0;
+						num_one_col = 0;
 						prev = csc_col_val;
 						csc_col_ptr_succ = false;
 						i++;
@@ -621,18 +625,20 @@ void read_len( tapa::async_mmap<int>& K_csc,
 	tapa::ostreams<int, NUM_CH>& N_val){
 	int bound = (N%WINDOW_SIZE == 0) ? N/WINDOW_SIZE : N/WINDOW_SIZE+1;
 	for(int i_req = 0, i_resp = 0; i_resp < bound;){
+#pragma HLS loop_flatten off
 #pragma HLS pipeline II=1
 		int len = ((N-i_resp*WINDOW_SIZE) < WINDOW_SIZE) ? N%WINDOW_SIZE : WINDOW_SIZE;
+		int ind = i_resp%NUM_CH;
 		if(i_req < bound && !K_csc.read_addr.full()){
                 K_csc.read_addr.try_write(i_req);
-                ++i_req;
+                i_req++;
         }
-        if(!K_csc.read_data.empty() && !K_csc_val[i_resp%NUM_CH].full() && !N_val[i_resp%NUM_CH].full()){
+        if(!K_csc.read_data.empty()){
                 int tmp;
 				K_csc.read_data.try_read(tmp);
-                K_csc_val[i_resp%NUM_CH].try_write(tmp);
-				N_val[i_resp%NUM_CH].try_write(len);
-                ++i_resp;
+                K_csc_val[ind].write(tmp);
+				N_val[ind].write(len);
+                i_resp++;
         }
 	}
 }

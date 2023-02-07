@@ -189,7 +189,7 @@ int main(int argc, char* argv[]){
 	K_fpga.push_back(acc);
 	//readCSRMatrix("L_can256.txt", IA, JA, A);
 	
-	std::clog << K_fpga[1] << std::endl;
+	//std::clog << K_fpga[1] << std::endl;
 	// std::clog << IA.size() << std::endl;
 	// std::clog << A.size() << std::endl;
 
@@ -204,7 +204,9 @@ int main(int argc, char* argv[]){
 
 	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
 	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
-	//std::clog << csc_row_ind_fpga[0][511] <<std::endl;
+	
+	std::clog << K_csc[156] << std::endl;
+
 	for(int i = 0; i < NUM_CH; i++){
 		if(edge_list_ch[i].size() == 0){
 			ap_uint<96> a = 0;
