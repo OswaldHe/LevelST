@@ -206,6 +206,7 @@ int main(int argc, char* argv[]){
 	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
 	
 	std::clog << K_csc[156] << std::endl;
+	std::clog << edge_list_ptr[1].size() << std::endl;
 
 	for(int i = 0; i < NUM_CH; i++){
 		if(edge_list_ch[i].size() == 0){

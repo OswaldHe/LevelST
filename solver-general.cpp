@@ -643,36 +643,6 @@ void read_len( tapa::async_mmap<int>& K_csc,
 	}
 }
 
-void drain(int pe_i, tapa::istream<float>& x_in, tapa::ostream<float>& x_out){
-	if(pe_i == 0){
-		bh(x_in);
-	}else{
-		for(;;){
-#pragma HLS pipeline II=1
-			x_out.write(x_in.read());
-		}
-	}
-}
-
-void read_X(tapa::async_mmap<float>& mmap, tapa::istream<bool>& fin_write, tapa::ostream<float>& fifo_x, int N){
-	for(int round = 0; round < N/WINDOW_SIZE; round++){
-		const int N = (round+1)*WINDOW_SIZE*NUM_CH;
-		fin_write.read();
-		for (int i_req = 0, i_resp = 0; i_resp < N;) {
-			if(i_req < N && !mmap.read_addr.full()){
-					mmap.read_addr.try_write(i_req);
-					++i_req;
-			}
-			if(!mmap.read_data.empty() && !fifo_x.full()){
-					float tmp;
-					mmap.read_data.try_read(tmp);
-					fifo_x.try_write(tmp);
-					++i_resp;
-			}
-		}
-	}
-}
-
 void fill_zero(tapa::ostream<float>& fifo_out){
 	fifo_out.try_write(0.0);
 }
@@ -753,35 +723,6 @@ load_x_to_cache:
 	}
 }
 
-void write_X_residue(tapa::istreams<float, NUM_CH>& x_res, tapa::async_mmap<float>& x, int N){
-	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
-	int last = ((level%NUM_CH)+(NUM_CH-1))%NUM_CH;
-	int dump_size = N %(WINDOW_SIZE*NUM_CH);
-	for(int i_req = 0, i_resp = 0; i_resp < dump_size;){
-		if(i_req < dump_size && !x_res[last].empty() && !x.write_addr.full() && !x.write_data.full()){
-			x.write_addr.try_write(i_req + N-dump_size);
-			x.write_data.try_write(x_res[last].read(nullptr));
-			++i_req;
-		}
-		if(!x.write_resp.empty()){
-			i_resp += unsigned(x.write_resp.read(nullptr))+1;
-		}
-	}
-}
-
-
-void Timer(tapa::istream<bool>& q_done, tapa::mmap<int> cycle_count){
-        int i = 0;
-        while(true){
-                ++i;
-                if(!q_done.empty()){
-                        q_done.read();
-                        break;
-                }
-        }
-        cycle_count[0] = i;
-}
-
 void SolverMiddleware( int pe_i, int N,
 	tapa::mmap<ap_uint<96>> csr_edge_list_ch,
 	tapa::mmap<int> csr_edge_list_ptr,
@@ -815,7 +756,7 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::stream<int> K_sub_csc("k_sub_csc");
 		tapa::streams<int, 6> N_sub("n_sub");
 		tapa::stream<float> y("y");
-		tapa::stream<float> x_prev("x_prev");
+		tapa::stream<float, WINDOW_SIZE * NUM_CH> x_prev("x_prev");
 		tapa::stream<float> x_next("x_next");
 		tapa::stream<float> x_apt("x_apt");
 		tapa::stream<float> x_bypass("x_bypass");
