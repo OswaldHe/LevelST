@@ -122,7 +122,7 @@ void read_float_vec(int pe_i, int total_N, tapa::async_mmap<float>& mmap, tapa::
 //TODO: replace with serpen after modifying the read width
 void PEG_Xvec( int pe_i, int total_N,
 	tapa::istream<int>& fifo_inst_in,
-	tapa::istream<ap_uint<96>>& spmv_A,
+	tapa::istream<ap_uint<64>>& spmv_A, // 12-bit row + 20-bit col + 32-bit float
 	tapa::istream<float>& fifo_x_in,
 	tapa::ostream<float>& fifo_x_out,
 	tapa::ostream<float>& fifo_y_out,
@@ -132,22 +132,29 @@ void PEG_Xvec( int pe_i, int total_N,
 		int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
 		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
 
+round:
 		for(int round = 0; round < bound; round++){
 #pragma HLS loop_flatten off
 			const int num_x = N_in.read();
 			N_out.write(num_x);
 
 			float local_res[WINDOW_SIZE];
-			float local_x[WINDOW_SIZE];
+			float local_x[4][WINDOW_SIZE];
+
+#pragma HLS bind_storage variable=local_x latency=2
+#pragma HLS array_partition variable=local_x complete dim=1
+#pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
+#pragma HLS array_partition variable=local_res cyclic factor=4
 
 			//reset
+reset:
 			for(int i = 0; i < num_x; i++){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=1 max=512
 				local_res[i] = 0.0;
 			}
-			for(int i = 0; i < WINDOW_SIZE; i++){
-				local_x[i] = 0.0;
-			}
 
+load_x:
 			for(int ite = 0; ite < pe_i+round*NUM_CH; ite++){
 				const int N = fifo_inst_in.read();
 				//read x
@@ -158,7 +165,9 @@ void PEG_Xvec( int pe_i, int total_N,
 					for(int i = 0; i < WINDOW_SIZE;){
 						x_val = req_x.read(x_val_succ);
 						if(x_val_succ){
-							local_x[i] = x_val;
+							for(int k = 0; k < 4; k++){
+								local_x[k][i] = x_val;
+							}
 							x_val_succ = false;
 							i++;
 						}
@@ -168,7 +177,9 @@ void PEG_Xvec( int pe_i, int total_N,
 						x_val = fifo_x_in.read(x_val_succ);
 						if(x_val_succ){
 							fifo_x_out.write(x_val);
-							local_x[i] = x_val;
+							for(int k = 0; k < 4; k++){
+								local_x[k][i] = x_val;
+							}
 							x_val_succ = false;
 							i++;
 						}
@@ -177,22 +188,29 @@ void PEG_Xvec( int pe_i, int total_N,
 
 				//read A and compute
 				bool a_val_succ = false;
+
+compute:
 				for(int i = 0; i < N;){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=1 max=512
 					ap_uint<96> a = spmv_A.read(a_val_succ);
 					if(a_val_succ){
-						ap_uint<32> a_row = a(95, 64);
-						ap_uint<32> a_col = a(63, 32);
+						ap_uint<12> a_row = a(63, 52);
+						ap_uint<20> a_col = a(51, 32);
 						ap_uint<32> a_val = a(31, 0);
 						float a_val_f = tapa::bit_cast<float>(a_val);
-						local_res[a_row] += local_x[a_col - ite * WINDOW_SIZE] * a_val_f;
+						local_res[a_row] += local_x[i%4][a_col - ite * WINDOW_SIZE] * a_val_f;
 						a_val_succ = false;
 						i++;
 					}
 				}
 			}
 
+write_y:
 			//write result
 			for(int i = 0; i < num_x; i++){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=1 max=512
 				fifo_y_out.write(local_res[i]);
 			}
 		}
@@ -426,7 +444,7 @@ remove_dependency:
 		}
 }
 
-void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
+void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<64>>& fifo_A_ch,
 			tapa::istream<int>& fifo_A_ptr,
 			tapa::istream<int>& csc_col_ptr,
 			tapa::istream<int>& csc_row_ind,
@@ -461,12 +479,12 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 				for(int i = 0; i < K;){
 					a_entry = fifo_A_ch.read(fifo_A_succ);
 					if(fifo_A_succ){
-						ap_uint<32> row = a_entry(95, 64);
-						ap_uint<32> col = a_entry(63, 32);
+						ap_uint<12> row = a_entry(63, 52);
+						ap_uint<20> col = a_entry(51, 32);
 						ap_uint<32> val = a_entry(31, 0);
 						float val_f = tapa::bit_cast<float>(val);
 						//if(round == 0 && pe_i == 0) LOG(INFO) << "(" << (int)row << "," << (int) col << "): " << val_f;
-						if(tapa::bit_cast<int>(row) != prev_row){
+						if(row != (prev_row & 0xFFF)){
 							if(prev_row != -1){
 								solver_row_ptr_a.write(row_ptr);
 								solver_row_ptr_b.write(row_ptr);
@@ -476,7 +494,7 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 								}
 								num_one_row = 0;
 							}
-							prev_row = tapa::bit_cast<int>(row);
+							prev_row = (int) 0 | row;
 						}
 						solver_val_arr[num_one_row] = val_f;
 						solver_col_ind_arr[num_one_row] = tapa::bit_cast<int>(col)-(pe_i+NUM_CH*round)*WINDOW_SIZE;
@@ -529,11 +547,11 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<96>>& fifo_A_ch,
 }
 
 void read_A_and_split(int pe_i, int total_N,
-	tapa::async_mmap<ap_uint<96>>& csr_edge_list_ch,
+	tapa::async_mmap<ap_uint<512>>& csr_edge_list_ch,
 	tapa::mmap<int> csr_edge_list_ptr,
-	tapa::ostream<ap_uint<96>>& fifo_A_ch,
+	tapa::ostream<ap_uint<64>>& fifo_A_ch,
 	tapa::ostream<int>& fifo_A_ptr,
-	tapa::ostream<ap_uint<96>>& spmv_val,
+	tapa::ostream<ap_uint<64>>& spmv_val,
 	tapa::ostream<int>& spmv_inst){
 		int offset = 0;
 		int offset_i = 0;
@@ -545,6 +563,7 @@ round:
 traverse_block:
 			for(int i = 0; i < pe_i+NUM_CH*round+1; i++){
 				const int N = csr_edge_list_ptr[i+offset_i];
+				const int num_ite = (N + 7) / 8;
 				if(i == pe_i+NUM_CH*round) {
 					fifo_A_ptr.write(N);
 				}
@@ -552,26 +571,36 @@ traverse_block:
 					spmv_inst.write(N);
 				}
 split:
-				for (int i_req = 0, i_resp = 0; i_resp < N;) {
-					if(i_req < N && !csr_edge_list_ch.read_addr.full()){
+				for (int i_req = 0, i_resp = 0; i_resp < num_ite;) {
+					if(i_req < num_ite && !csr_edge_list_ch.read_addr.full()){
 							csr_edge_list_ch.read_addr.try_write(i_req+offset);
 							++i_req;
 					}
 					if(!csr_edge_list_ch.read_data.empty()){
-						if(i == pe_i+NUM_CH*round && !fifo_A_ch.full()){
-							ap_uint<96> tmp;
+						if(i == pe_i+NUM_CH*round){
+							ap_uint<512> tmp;
 							csr_edge_list_ch.read_data.try_read(tmp);
-							fifo_A_ch.try_write(tmp);
+							for(int index = 0; index < 8; index++){
+								ap_uint<64> tmp_o = tmp(index * 64 + 63, index * 64);
+								if(tmp_o(63,52) ^ 0xFFF){
+									fifo_A_ch.write(tmp_o);
+								}
+							}
 							++i_resp;
-						}else if(i != pe_i+NUM_CH*round && !spmv_val.full()){
-							ap_uint<96> tmp;
+						}else{
+							ap_uint<512> tmp;
 							csr_edge_list_ch.read_data.try_read(tmp);
-							spmv_val.try_write(tmp);
+							for(int index = 0; index < 8; index++){
+								ap_uint<64> tmp_o = tmp(index * 64 + 63, index * 64);
+								if(tmp_o(63,52) ^ 0xFFF){
+									spmv_val.write(tmp_o);
+								}
+							}
 							++i_resp;
 						}
 					}
 				}
-				offset+=N;
+				offset+=num_ite;
 			}
 			offset_i += (pe_i+NUM_CH*round+1);
 		}
@@ -724,7 +753,7 @@ load_x_to_cache:
 }
 
 void SolverMiddleware( int pe_i, int N,
-	tapa::mmap<ap_uint<96>> csr_edge_list_ch,
+	tapa::mmap<ap_uint<512>> csr_edge_list_ch,
 	tapa::mmap<int> csr_edge_list_ptr,
 	tapa::mmap<float> f,
 	tapa::mmap<int> csc_col_ptr,
@@ -736,12 +765,12 @@ void SolverMiddleware( int pe_i, int N,
 	tapa::ostream<int>& block_id,
 	tapa::istream<float>& req_x){
 		
-		tapa::stream<ap_uint<96>> fifo_A_ch("fifo_A_ch");
+		tapa::stream<ap_uint<64>> fifo_A_ch("fifo_A_ch");
 		tapa::stream<int> fifo_A_ptr("fifo_A_ptr");
 		tapa::stream<int> csc_col_ptr_q("csc_col_ptr");
 		tapa::stream<int> csc_row_ind_q("csc_row_ind");
 		tapa::stream<float> f_q("f");
-		tapa::stream<ap_uint<96>> spmv_val("spmv_val");
+		tapa::stream<ap_uint<64>> spmv_val("spmv_val");
 		tapa::stream<int> spmv_inst("spmv_inst");
 		tapa::stream<int> solver_row_ptr_a("solver_row_ptr_a");
 		tapa::stream<int> solver_row_ptr_b("solver_row_ptr_b");
@@ -786,7 +815,7 @@ void SolverMiddleware( int pe_i, int N,
 			.invoke<tapa::join>(X_Merger, pe_i, N, x_prev, x_next, x_bypass, x_q_out, N_sub);
 	}
 
-void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
+void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
 			tapa::mmaps<int, NUM_CH> csc_col_ptr, 
 			tapa::mmaps<int, NUM_CH> csc_row_ind, 

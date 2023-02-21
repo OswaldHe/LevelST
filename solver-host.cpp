@@ -18,7 +18,7 @@ constexpr int WINDOW_SIZE = 512;
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
 
-void TrigSolver(tapa::mmaps<ap_uint<96>, NUM_CH> csr_edge_list_ch,
+void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
 			tapa::mmaps<int, NUM_CH> csc_col_ptr, 
 			tapa::mmaps<int, NUM_CH> csc_row_ind, 
@@ -82,18 +82,18 @@ void generate_edgelist_for_pes(int N,
 		const aligned_vector<int>& csr_row_ptr,
 		const aligned_vector<int>& csr_col_ind,
 		const aligned_vector<float>& csr_val,
-		vector<aligned_vector<ap_uint<96>>>& edge_list_ch,
+		vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
 		vector<aligned_vector<int>>& edge_list_ptr){
 			int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 			for(int i = 0; i < bound; i++){
-				vector<aligned_vector<ap_uint<96>>> tmp_edge_list(i+1);
+				vector<aligned_vector<ap_uint<64>>> tmp_edge_list(i+1);
 				for(int j = i*WINDOW_SIZE; j < (i+1)*WINDOW_SIZE && j < N; j++){
 					int start = (j == 0)? 0 : csr_row_ptr[j-1];
 					int end = csr_row_ptr[j];
 					for(int k = start; k < end; k++){
-						ap_uint<96> a = 0;
-						a(95, 64) = j - i*WINDOW_SIZE;
-						a(63, 32) = csr_col_ind[k];
+						ap_uint<64> a = 0;
+						a(63, 52) = (ap_uint<12>)(j - i*WINDOW_SIZE & 0xFFF);
+						a(51, 32) = (ap_uint<20>)(csr_col_ind[k] & 0xFFFFF);
 						a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
 						tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE].push_back(a);
 					}
@@ -105,6 +105,12 @@ void generate_edgelist_for_pes(int N,
 					edge_list_ptr[i%NUM_CH].push_back(tmp_edge_list[j].size());
 					for(int k = 0; k < tmp_edge_list[j].size(); k++){
 						edge_list_ch[i%NUM_CH].push_back(tmp_edge_list[j][k]);
+					}
+					int rest = tmp_edge_list[j].size() % 8 == 0 ? 0 : 8 - (tmp_edge_list[j].size() % 8);
+					for(int k = 0; k < rest; k ++){
+						ap_uint<64> a = 0;
+						a(63, 52) = (ap_uint<12>) 0xFFF;
+						edge_list_ch[i%NUM_CH].push_back(a);
 					}
 				}
 			}
@@ -148,7 +154,7 @@ int main(int argc, char* argv[]){
 	aligned_vector<int> cycle(1, 0); 
 
 	// for kernel
-	vector<aligned_vector<ap_uint<96>>> edge_list_ch(NUM_CH);
+	vector<aligned_vector<ap_uint<64>>> edge_list_ch(NUM_CH);
 	vector<aligned_vector<int>> edge_list_ptr(NUM_CH);
 	vector<aligned_vector<float>> f_fpga(NUM_CH);
 	aligned_vector<float> x_fpga(N, 0.0);
@@ -174,7 +180,7 @@ int main(int argc, char* argv[]){
 			ind++;
 		} else {
 			A[ind] = 1.f;
-			JA[ind] = i-1;
+			JA[ind] = i-(i/2)-1;
 			A[ind+1] = i+1;
 			JA[ind+1] = i;
 			if(i % WINDOW_SIZE == 0) {
@@ -210,8 +216,10 @@ int main(int argc, char* argv[]){
 
 	for(int i = 0; i < NUM_CH; i++){
 		if(edge_list_ch[i].size() == 0){
-			ap_uint<96> a = 0;
-			edge_list_ch[i].push_back(a);
+			for(int j = 0; j < 8; j++){
+				ap_uint<64> a = 0;
+				edge_list_ch[i].push_back(a);
+			}
 		}
 		if(edge_list_ptr[i].size() == 0){
 			edge_list_ptr[i].push_back(0);
@@ -258,7 +266,7 @@ int main(int argc, char* argv[]){
 	cycle[0] = 0;
 
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
-                        tapa::read_only_mmaps<ap_uint<96>, NUM_CH>(edge_list_ch),
+                        tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(edge_list_ch).reinterpret<ap_uint<512>>(),
 						tapa::read_only_mmaps<int, NUM_CH>(edge_list_ptr),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
