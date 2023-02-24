@@ -67,10 +67,18 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 			int pos = ((c == 0) ? 0 : csc_col_ptr[c-1]) + col_nz[c];
 			csc_val[pos] = val;
 			csc_row_ind[pos] = r;
-			csc_row_ind_fpga[(c/WINDOW_SIZE)%NUM_CH].push_back(r); // ?
 			k_count[c/WINDOW_SIZE]++;
 			col_nz[c]++;
 		}
+	}
+
+	int prev = 0;
+	for(int i = 0; i < N; i++){
+		int next = csc_col_ptr[i];
+		for(int j = prev; j < next; j++){
+			csc_row_ind_fpga[(i / WINDOW_SIZE) % NUM_CH].push_back(csc_row_ind[j]);
+		}
+		prev = next;
 	}
 
 	for(int i = 0; i < bound; i++){
@@ -211,8 +219,9 @@ int main(int argc, char* argv[]){
 	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
 	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
 	
-	std::clog << K_csc[156] << std::endl;
-	std::clog << edge_list_ptr[1].size() << std::endl;
+	// std::clog << K_csc[156] << std::endl;
+	// std::clog << edge_list_ptr[1].size() << std::endl;
+	std::clog << csc_row_ind[2] << std::endl;
 
 	for(int i = 0; i < NUM_CH; i++){
 		if(edge_list_ch[i].size() == 0){

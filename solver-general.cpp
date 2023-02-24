@@ -233,14 +233,15 @@ for(;;){
 	const int N = N_in.read();
 	N_out.write(N);
 
-	float local_x[WINDOW_SIZE];
+	float local_x[4][WINDOW_SIZE];
 	float local_a[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
 	int local_ia[WINDOW_SIZE];
 	int local_ja[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
 	float cyclic_aggregate[16];
 
 #pragma HLS bind_storage variable=local_a type=RAM_2P impl=URAM
-#pragma HLS array_partition cyclic variable=local_x factor=4
+#pragma HLS array_partition complete variable=local_x dim=1
+#pragma HLS array_partition cyclic variable=local_x factor=4 dim=2
 #pragma HLS array_partition cyclic variable=local_a factor=4
 #pragma HLS array_partition cyclic variable=local_ia factor=4
 #pragma HLS array_partition cyclic variable=local_ja factor=12
@@ -264,7 +265,7 @@ read_ia_and_f:
 		if(!f_succ) f_val = f.read(f_succ);
 		if(ia_succ && f_succ){
 			local_ia[i] = ia_val;
-			local_x[i] = f_val;
+			local_x[0][i] = f_val;
 			for(int j = prev_ia; j < ia_val;){
 #pragma HLS loop_tripcount min=1 max=40000
 #pragma HLS pipeline II=1
@@ -290,7 +291,10 @@ read_spmv_and_subtract:
 #pragma HLS pipeline II=1
 		spmv_in_val = spmv_in.read(spmv_succ);
 		if(spmv_succ){
-			local_x[i] -= spmv_in_val;
+			float deduct = local_x[0][i] - spmv_in_val;
+			for(int j = 0; j < 4; j++){
+				local_x[j][i] = deduct;
+			}
 			spmv_succ = false;
 			i++;
 		}
@@ -300,32 +304,35 @@ read_spmv_and_subtract:
 	int index = 0;
 
 compute:
-        for(int i = 0; i < N;){
+    for(int i = 0; i < N;){
 #pragma HLS loop_tripcount min=1 max=256
 		if(!next_succ) index = next.read(next_succ);
 		if(next_succ) {
 			int start = (index == 0) ? 0:local_ia[index-1];
 			int end = local_ia[index]-1;
 reset:
-			for(int i = 0; i < 16; i++){
-				cyclic_aggregate[i] = 0.0;
+			for(int j = 0; j < 16; j++){
+				cyclic_aggregate[j] = 0.0;
 			}
 accumulate:
-			for(int i = start; i < end; ++i){
+			for(int j = start; j < end; ++j){
 #pragma HLS loop_tripcount min=1 max=256
 #pragma HLS dependence variable=cyclic_aggregate false
 #pragma HLS dependence variable=cyclic_aggregate type=inter distance=16 true
 #pragma HLS pipeline II=1
-				int c = local_ja[i];
-				cyclic_aggregate[i%16] += (local_x[c] * local_a[i]);
+				int c = local_ja[j];
+				cyclic_aggregate[j%16] += (local_x[j%4][c] * local_a[j]);
 			}
 aggregate:
-			for(int i = 1; i < 16; ++i){
+			for(int j = 1; j < 16; j++){
 #pragma HLS pipeline II=1
-				cyclic_aggregate[0] += cyclic_aggregate[i];
+				cyclic_aggregate[0] += cyclic_aggregate[j];
 			}
-			local_x[index] -= cyclic_aggregate[0]; 
-			local_x[index] /= local_a[end];
+			float local_x_0 = (local_x[0][index] - cyclic_aggregate[0])/local_a[end]; 
+sync:
+			for(int j = 0; j < 4; j++){
+				local_x[j][index] = local_x_0;
+			}
 			ack.write(index);
 			next_succ = false;
 			i++;
@@ -336,7 +343,7 @@ write_x:
 	for(int i = 0; i < N; i++){
 #pragma HLS loop_tripcount min=1 max=256
 #pragma HLS pipeline II=1
-		x_out.write(local_x[i]);
+		x_out.write(local_x[0][i]);
 	}
 }
 }
@@ -428,9 +435,9 @@ compute:
 		}
 		if(!ack_succ) ack_val = ack.read(ack_succ);
 	    if(ack_succ){
-			int start = (ack_val == 0) ? 0 : local_csc_col_ptr[ack_val-1];
+			int begin = (ack_val == 0) ? 0 : local_csc_col_ptr[ack_val-1];
 remove_dependency:
-			for(int i = start; i < local_csc_col_ptr[ack_val]; i++){
+			for(int i = begin; i < local_csc_col_ptr[ack_val]; i++){
 #pragma HLS pipeline II=1
 #pragma HLS loop_tripcount min=1 max=256
 				int index = local_csc_row_ind[i];
