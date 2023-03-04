@@ -1,7 +1,7 @@
 #include <ap_int.h>
 #include <cstdint>
 #include <tapa.h>
-// #include <glog/logging.h>
+//#include <glog/logging.h>
 
 constexpr int WINDOW_SIZE = 512;
 constexpr int NUM_CH = 6;
@@ -159,11 +159,10 @@ load_x:
 				const int N = fifo_inst_in.read();
 				//read x
 				bool x_val_succ = false;
-				float x_val = 0.0;
 				if(ite < round * NUM_CH && N != 0){
 					block_id.write(ite);
 					for(int i = 0; i < WINDOW_SIZE;){
-						x_val = req_x.read(x_val_succ);
+						float x_val = req_x.read(x_val_succ);
 						if(x_val_succ){
 							for(int k = 0; k < 4; k++){
 								local_x[k][i] = x_val;
@@ -174,7 +173,7 @@ load_x:
 					}
 				}else if(ite >= round * NUM_CH){
 					for(int i = 0; i < WINDOW_SIZE;){
-						x_val = fifo_x_in.read(x_val_succ);
+						float x_val = fifo_x_in.read(x_val_succ);
 						if(x_val_succ){
 							fifo_x_out.write(x_val);
 							for(int k = 0; k < 4; k++){
@@ -217,7 +216,7 @@ write_y:
 		
 	}
 
-void solve_v2(tapa::istream<int>& next,
+void solve_v2(int pe_i, tapa::istream<int>& next,
 		tapa::ostream<int>& ack,
 		tapa::istream<int>& ia,
 		tapa::istream<int>& ja,
@@ -348,14 +347,14 @@ write_x:
 }
 }
 
-void analyze(tapa::istream<int>& ia,
+void analyze(int pe_i, tapa::istream<int>& ia,
 		tapa::istream<int>& csc_col_ptr,
 		tapa::istream<int>& csc_row_ind,
 		tapa::istream<int>& ack,
 		tapa::ostream<int>& next,
 		tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
 
-	for(;;){
+	for(int round = 0;; round++){
 #pragma HLS loop_flatten off
 		const int N = N_in.read();
 		N_out.write(N);
@@ -716,44 +715,43 @@ handle_request:
 		}
 scan:
 		for(int i = 0; i < NUM_CH; i++){
-			block = block_id[i].read(read_succ);
-			if(read_succ){
-				if(cache_index[block%4] == block){
-					// read from bram
-load_cache:
-					for(int j = 0; j < WINDOW_SIZE;){
-#pragma HLS pipeline II=1
-#pragma HLS loop_tripcount min=0 max=1024
-						if(!fifo_x_out[i].full()){
-							float x_f = local_cache_x[(block%4)*WINDOW_SIZE+j];
-							fifo_x_out[i].try_write(x_f);
-							j++;
+			if(!block_id[i].empty()){
+				block = block_id[i].peek(nullptr);
+				if(level_done*NUM_CH <= block) continue;
+				else {
+					block_id[i].read(nullptr);
+					if(cache_index[block%4] == block){
+						// read from bram
+	load_cache:
+						for(int j = 0; j < WINDOW_SIZE;){
+	#pragma HLS pipeline II=1
+	#pragma HLS loop_tripcount min=0 max=1024
+							if(!fifo_x_out[i].full()){
+								float x_f = local_cache_x[(block%4)*WINDOW_SIZE+j];
+								fifo_x_out[i].try_write(x_f);
+								j++;
+							}
 						}
-					}
-				} else {
-					if(level_done*NUM_CH <= block){
-						fin_write.read();
-						level_done++;
-					}
-					cache_index[block%4] = block;
-load_x_to_cache:
-					for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE;){
-#pragma HLS pipeline II=1
-#pragma HLS loop_tripcount min=0 max=1024
-						if(i_req < WINDOW_SIZE && !mmap.read_addr.full()){
-							mmap.read_addr.try_write(i_req+block*WINDOW_SIZE);
-							++i_req;
-						}
-						if(!mmap.read_data.empty() && !fifo_x_out[i].full()){
-							float tmp;
-							mmap.read_data.try_read(tmp);
-							fifo_x_out[i].try_write(tmp);
-							local_cache_x[(block%4)*WINDOW_SIZE+i_resp] = tmp;
-							++i_resp;
+					} else {
+						cache_index[block%4] = block;
+	load_x_to_cache:
+						for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE;){
+	#pragma HLS pipeline II=1
+	#pragma HLS loop_tripcount min=0 max=1024
+							if(i_req < WINDOW_SIZE && !mmap.read_addr.full()){
+								mmap.read_addr.try_write(i_req+block*WINDOW_SIZE);
+								++i_req;
+							}
+							if(!mmap.read_data.empty() && !fifo_x_out[i].full()){
+								float tmp;
+								mmap.read_data.try_read(tmp);
+								fifo_x_out[i].try_write(tmp);
+								local_cache_x[(block%4)*WINDOW_SIZE+i_resp] = tmp;
+								++i_resp;
+							}
 						}
 					}
 				}
-				read_succ = false;
 			}
 		}
 	}
@@ -793,7 +791,7 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::streams<int, 6> N_sub("n_sub");
 		tapa::stream<float> y("y");
 		tapa::stream<float, WINDOW_SIZE * NUM_CH> x_prev("x_prev");
-		tapa::stream<float> x_next("x_next");
+		tapa::stream<float, WINDOW_SIZE * NUM_CH> x_next("x_next");
 		tapa::stream<float> x_apt("x_apt");
 		tapa::stream<float> x_bypass("x_bypass");
 
@@ -817,8 +815,8 @@ void SolverMiddleware( int pe_i, int N,
 				solver_col_ptr,
 				solver_row_ind,
 				N_sub, N_sub)
-			.invoke<tapa::detach>(analyze, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub) // ?
-			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub)
+			.invoke<tapa::detach>(analyze, pe_i, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub) // ?
+			.invoke<tapa::detach>(solve_v2, pe_i, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub)
 			.invoke<tapa::join>(X_Merger, pe_i, N, x_prev, x_next, x_bypass, x_q_out, N_sub);
 	}
 

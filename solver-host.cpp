@@ -7,6 +7,8 @@
 #include <cmath>
 #include <tapa.h>
 #include <gflags/gflags.h>
+#include "mmio.h"
+#include "sparse_helper.h"
 
 using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
@@ -148,18 +150,37 @@ void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, align
 int main(int argc, char* argv[]){
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-	const int N = argc > 1 ? atoll(argv[1]) : 8192;
-	const int remainder = N % WINDOW_SIZE;
+	// const int N = argc > 1 ? atoll(argv[1]) : 8192;
+	// const int remainder = N % WINDOW_SIZE;
 	// int K = N*2-N/WINDOW_SIZE;
 	// if(remainder != 0) K --;
-	int K = N*2 - 1;
+	// int K = N*2 - 1;
+	int M, K, nnz;
+    vector<int> CSRRowPtr;
+    vector<int> CSRColIndex;
+    vector<float> CSRVal;
 
-	aligned_vector<float> A(K);
-	aligned_vector<int> IA(N);
-	aligned_vector<int> JA(K);
-	aligned_vector<float> f(N);
+	read_suitsparse_matrix_FP64("lp1.mtx",
+                           CSRRowPtr,
+                           CSRColIndex,
+                           CSRVal,
+                           M,
+                           K,
+                           nnz);
+
+	aligned_vector<float> A;
+	aligned_vector<int> IA;
+	aligned_vector<int> JA;
+	aligned_vector<float> f;
 	// aligned_vector<float> x(N);
 	aligned_vector<int> cycle(1, 0); 
+
+	extract_lower_triangular_matrix(M, K, nnz, CSRRowPtr, CSRColIndex, CSRVal, IA, JA, A);
+
+	nnz = A.size();
+
+	IA.erase(IA.begin());
+	const int N = M;
 
 	// for kernel
 	vector<aligned_vector<ap_uint<64>>> edge_list_ch(NUM_CH);
@@ -174,54 +195,62 @@ int main(int argc, char* argv[]){
 	// 	}
 	// }
 
+	for(int i = 0; i < N; i++){
+		f.push_back(i/10.0);
+	    f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
+	}
 
-	int ind = 0;
-	int acc = 0;
-	//populate lower triangular sparse matrix
-    for (int i = 0; i < N; ++i) {
-		f[i] = 0.5*(i+1);
-		f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
-		if(i == 0) {
-			A[ind] = i+1;
-			JA[ind] = i;
-			acc += 1;
-			ind++;
-		} else {
-			A[ind] = 1.f;
-			JA[ind] = i-(i/2)-1;
-			A[ind+1] = i+1;
-			JA[ind+1] = i;
-			if(i % WINDOW_SIZE == 0) {
-				K_fpga.push_back(acc);
-				acc = 0;
-			}
-			acc +=2;
-			ind+=2;
-		}
-		IA[i] = ind;
-    }
-	K_fpga.push_back(acc);
+	std::clog << M << std::endl;
+	std::clog << nnz << std::endl;
+
+
+	// int ind = 0;
+	// int acc = 0;
+	// //populate lower triangular sparse matrix
+    // for (int i = 0; i < N; ++i) {
+	// 	f[i] = 0.5*(i+1);
+	// 	f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
+	// 	if(i == 0) {
+	// 		A[ind] = i+1;
+	// 		JA[ind] = i;
+	// 		acc += 1;
+	// 		ind++;
+	// 	} else {
+	// 		A[ind] = 1.f;
+	// 		JA[ind] = i-(i/2)-1;
+	// 		A[ind+1] = i+1;
+	// 		JA[ind+1] = i;
+	// 		if(i % WINDOW_SIZE == 0) {
+	// 			K_fpga.push_back(acc);
+	// 			acc = 0;
+	// 		}
+	// 		acc +=2;
+	// 		ind+=2;
+	// 	}
+	// 	IA[i] = ind;
+    // }
+	// K_fpga.push_back(acc);
 	//readCSRMatrix("L_can256.txt", IA, JA, A);
 	
 	//std::clog << K_fpga[1] << std::endl;
 	// std::clog << IA.size() << std::endl;
 	// std::clog << A.size() << std::endl;
 
-	aligned_vector<float> csc_val(K, 0.0);
+	aligned_vector<float> csc_val(nnz, 0.0);
 	aligned_vector<int> csc_col_ptr(N, 0);
-	aligned_vector<int> csc_row_ind(K, 0);
+	aligned_vector<int> csc_row_ind(nnz, 0);
 	aligned_vector<int> K_csc;
 
 	//for kernel
 	vector<aligned_vector<int>> csc_col_ptr_fpga(NUM_CH);
 	vector<aligned_vector<int>> csc_row_ind_fpga(NUM_CH);
 
-	convertCSRToCSC(N, K, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
+	convertCSRToCSC(N, nnz, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
 	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
 	
 	// std::clog << K_csc[156] << std::endl;
 	// std::clog << edge_list_ptr[1].size() << std::endl;
-	std::clog << csc_row_ind[2] << std::endl;
+	// std::clog << csc_row_ind[2] << std::endl;
 
 	for(int i = 0; i < NUM_CH; i++){
 		if(edge_list_ch[i].size() == 0){
@@ -245,7 +274,7 @@ int main(int argc, char* argv[]){
 	}
 
 	//triangular solver in cpu
-	float expected_x[N];
+	vector<float> expected_x(N);
 	int next = 0;
 	for(int i = 0; i < N; i++){
 		float image = f[i];
