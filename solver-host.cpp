@@ -49,12 +49,7 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 		csc_col_ptr[csr_col_ind[i]]++;
 	}
 
-	int acc = csc_col_ptr[0];
-	csc_col_ptr_fpga[0].push_back(acc);
 	for(int i = 1; i < N; i++){
-		if(i % WINDOW_SIZE == 0) acc = 0;
-		acc += csc_col_ptr[i];
-		csc_col_ptr_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(acc);
 		csc_col_ptr[i] += csc_col_ptr[i-1];
 	}
 
@@ -69,17 +64,25 @@ void convertCSRToCSC(int N, int K /* num of non-zeros*/,
 			int pos = ((c == 0) ? 0 : csc_col_ptr[c-1]) + col_nz[c];
 			csc_val[pos] = val;
 			csc_row_ind[pos] = r;
-			k_count[c/WINDOW_SIZE]++;
 			col_nz[c]++;
 		}
 	}
 
 	int prev = 0;
+	int acc = 0;
 	for(int i = 0; i < N; i++){
+		if(i % WINDOW_SIZE == 0) acc = 0;
 		int next = csc_col_ptr[i];
 		for(int j = prev; j < next; j++){
-			csc_row_ind_fpga[(i / WINDOW_SIZE) % NUM_CH].push_back(csc_row_ind[j]);
+			if(csc_row_ind[j] < (i/WINDOW_SIZE + 1)*WINDOW_SIZE){
+				csc_row_ind_fpga[(i / WINDOW_SIZE) % NUM_CH].push_back(csc_row_ind[j] - (i/WINDOW_SIZE)*WINDOW_SIZE);
+				k_count[i/WINDOW_SIZE]++;
+				acc++;
+			} else {
+				break;
+			}
 		}
+		csc_col_ptr_fpga[(i / WINDOW_SIZE) % NUM_CH].push_back(acc);
 		prev = next;
 	}
 

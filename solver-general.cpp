@@ -216,7 +216,7 @@ write_y:
 		
 	}
 
-void solve_v2(int pe_i, tapa::istream<int>& next,
+void solve_v2(tapa::istream<int>& next,
 		tapa::ostream<int>& ack,
 		tapa::istream<int>& ia,
 		tapa::istream<int>& ja,
@@ -225,60 +225,57 @@ void solve_v2(int pe_i, tapa::istream<int>& next,
 		tapa::istream<float>& spmv_in,
 		tapa::ostream<float>& x_out, 
 		tapa::istream<int>& N_in,
-		tapa::ostream<int>& N_out){
+		tapa::ostream<int>& N_out,
+		tapa::istream<int>& K_in,
+		tapa::ostream<int>& K_out){
 
 for(;;){
 #pragma HLS loop_flatten off
 	const int N = N_in.read();
+	const int K = K_in.read();
 	N_out.write(N);
+	K_out.write(K);
 
-	float local_x[4][WINDOW_SIZE];
+	float local_x[WINDOW_SIZE];
 	float local_a[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
 	int local_ia[WINDOW_SIZE];
 	int local_ja[(WINDOW_SIZE+1)*WINDOW_SIZE/2];
 	float cyclic_aggregate[16];
 
 #pragma HLS bind_storage variable=local_a type=RAM_2P impl=URAM
-#pragma HLS array_partition complete variable=local_x dim=1
-#pragma HLS array_partition cyclic variable=local_x factor=4 dim=2
+#pragma HLS array_partition cyclic variable=local_x factor=4 
 #pragma HLS array_partition cyclic variable=local_a factor=4
 #pragma HLS array_partition cyclic variable=local_ia factor=4
 #pragma HLS array_partition cyclic variable=local_ja factor=12
 #pragma HLS array_partition complete variable=cyclic_aggregate
 
-	int ia_val = 0;
-	float f_val = 0.f;
-	float a_val = 0.f;
-	int ja_val = 0;
-	float spmv_in_val = 0.0;
+read_f:
+	for(int i = 0; i < N;){
+		if(!f.empty()){
+			float tmp_f; f.try_read(tmp_f);
+			local_x[i] = tmp_f;
+			i++;
+		}
+	}
 
-	bool ia_succ = false, ja_succ = false, a_succ = false, f_succ = false, spmv_succ = false;
+read_ja_and_a:
+	for(int i = 0; i < K;){
+		if(!ja.empty() && !a.empty()){
+			int tmp_ja; ja.try_read(tmp_ja);
+			float tmp_a; a.try_read(tmp_a);
+			local_ja[i] = tmp_ja;
+			local_a[i] = tmp_a;
+			i++;
+		}
+	}
 
-	int prev_ia = 0;
-
-read_ia_and_f:
+read_ia:
 	for(int i = 0; i < N;) {
 #pragma HLS loop_tripcount min=1 max=256
 #pragma HLS pipeline II=1
-		if(!ia_succ) ia_val = ia.read(ia_succ);
-		if(!f_succ) f_val = f.read(f_succ);
-		if(ia_succ && f_succ){
-			local_ia[i] = ia_val;
-			local_x[0][i] = f_val;
-			for(int j = prev_ia; j < ia_val;){
-#pragma HLS loop_tripcount min=1 max=40000
-#pragma HLS pipeline II=1
-				if(!ja_succ) ja_val = ja.read(ja_succ);
-				if(!a_succ) a_val = a.read(a_succ);
-				if(ja_succ && a_succ){
-					local_a[j] = a_val;
-					local_ja[j] = ja_val;
-					a_succ = ja_succ = false;
-					j++;
-				}
-			}
-			prev_ia = ia_val;
-			ia_succ = f_succ = false;
+		if(!ia.empty()){
+			int tmp_ia; ia.try_read(tmp_ia);
+			local_ia[i] = tmp_ia;
 			i++;
 		}
 	}
@@ -288,25 +285,19 @@ read_spmv_and_subtract:
 #pragma HLS loop_tripcount min=1 max=256
 #pragma HLS dependence variable=local_x false
 #pragma HLS pipeline II=1
-		spmv_in_val = spmv_in.read(spmv_succ);
-		if(spmv_succ){
-			float deduct = local_x[0][i] - spmv_in_val;
-			for(int j = 0; j < 4; j++){
-				local_x[j][i] = deduct;
-			}
-			spmv_succ = false;
+		if(!spmv_in.empty()){
+			float tmp_spmv; spmv_in.try_read(tmp_spmv);
+			local_x[i] -= tmp_spmv;
 			i++;
 		}
 	}
 	
-	bool next_succ = false;
-	int index = 0;
 
 compute:
     for(int i = 0; i < N;){
 #pragma HLS loop_tripcount min=1 max=256
-		if(!next_succ) index = next.read(next_succ);
-		if(next_succ) {
+		if(!next.empty()) {
+			int index; next.try_read(index);
 			int start = (index == 0) ? 0:local_ia[index-1];
 			int end = local_ia[index]-1;
 reset:
@@ -320,20 +311,15 @@ accumulate:
 #pragma HLS dependence variable=cyclic_aggregate type=inter distance=16 true
 #pragma HLS pipeline II=1
 				int c = local_ja[j];
-				cyclic_aggregate[j%16] += (local_x[j%4][c] * local_a[j]);
+				cyclic_aggregate[j%16] += (local_x[c] * local_a[j]);
 			}
 aggregate:
 			for(int j = 1; j < 16; j++){
 #pragma HLS pipeline II=1
 				cyclic_aggregate[0] += cyclic_aggregate[j];
 			}
-			float local_x_0 = (local_x[0][index] - cyclic_aggregate[0])/local_a[end]; 
-sync:
-			for(int j = 0; j < 4; j++){
-				local_x[j][index] = local_x_0;
-			}
+			local_x[index] = (local_x[index] - cyclic_aggregate[0])/local_a[end]; 
 			ack.write(index);
-			next_succ = false;
 			i++;
 		}
 	}
@@ -342,22 +328,25 @@ write_x:
 	for(int i = 0; i < N; i++){
 #pragma HLS loop_tripcount min=1 max=256
 #pragma HLS pipeline II=1
-		x_out.write(local_x[0][i]);
+		x_out.write(local_x[i]);
 	}
 }
 }
 
-void analyze(int pe_i, tapa::istream<int>& ia,
+void analyze(tapa::istream<int>& ia,
 		tapa::istream<int>& csc_col_ptr,
 		tapa::istream<int>& csc_row_ind,
 		tapa::istream<int>& ack,
 		tapa::ostream<int>& next,
-		tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
+		tapa::istream<int>& N_in, tapa::ostream<int>& N_out,
+		tapa::istream<int>& K_in, tapa::ostream<int>& K_out){
 
-	for(int round = 0;; round++){
+	for(;;){
 #pragma HLS loop_flatten off
 		const int N = N_in.read();
+		const int K = K_in.read();
 		N_out.write(N);
+		K_out.write(K);
 
 		int parents[WINDOW_SIZE];
 		int local_csc_col_ptr[WINDOW_SIZE];
@@ -371,56 +360,46 @@ void analyze(int pe_i, tapa::istream<int>& ia,
 #pragma HLS array_partition variable=next_queue cyclic factor=4
 
         int num_nn = 0;
-        int ia_val = 0;
-		int csc_col_val = 0;
-		int csc_row_val = 0;
 		int start = 0, end = 0;
 
-        bool ia_succ = false, csc_col_succ = false, csc_row_succ = false;
+read_csc_col:
+	for(int i = 0; i < N;){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=1 max=512
+		if(!csc_col_ptr.empty()){
+			int tmp; csc_col_ptr.try_read(tmp);
+			local_csc_col_ptr[i] = tmp;
+			i++;
+		}
+	}
+
+read_csc_row:
+	for(int i = 0; i < K;){
+#pragma HLS pipeline II=1
+#pragma HLS loop_tripcount min=1 max=40000
+		if(!csc_row_ind.empty()){
+			int tmp; csc_row_ind.try_read(tmp);
+			local_csc_row_ind[i] = tmp;
+			i++;
+		}	
+	}
+
 
 compute_parents:
         for(int i = 0; i < N;){
 #pragma HLS pipeline II=1
 #pragma HLS loop_tripcount min=1 max=256
-                if(!ia_succ) ia_val = ia.read(ia_succ);
-                if(ia_succ){
-                	parents[i] = ia_val - num_nn - 1;
-                	num_nn = ia_val;
-                	if(parents[i] == 0) {
-						next_queue[end] = i;
-						end++;
-					}
-                	ia_succ = false;
-                	i++;
-                }
-        }
-
-
-	int prev_csc_col = 0;
-
-read_csc_col:
-	for(int i = 0; i < N;){
-#pragma HLS pipeline II=1
-#pragma HLS loop_tripcount min=1 max=256
-		if(!csc_col_succ) csc_col_val = csc_col_ptr.read(csc_col_succ);
-		if(csc_col_succ){
-			local_csc_col_ptr[i] = csc_col_val;
-			for(int j = prev_csc_col; j < csc_col_val;) {
-#pragma HLS pipeline II=1
-#pragma HLS loop_tripcount min=1 max=40000
-				if(!csc_row_succ) csc_row_val = csc_row_ind.read(csc_row_succ);
-				if(csc_row_succ){
-						local_csc_row_ind[j] = csc_row_val;
-						csc_row_succ = false;
-						j++;
+			if(!ia.empty()){
+				int ia_val; ia.try_read(ia_val);
+				parents[i] = ia_val - num_nn - 1;
+				num_nn = ia_val;
+				if(parents[i] == 0) {
+					next_queue[end] = i;
+					end++;
 				}
-
+				i++;
 			}
-			prev_csc_col = csc_col_val;
-			csc_col_succ = false;
-			i++;
-		}
-	}
+        }
 
 	int processed = 0;
 	bool ack_succ = false;
@@ -452,21 +431,22 @@ remove_dependency:
 
 void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<64>>& fifo_A_ch,
 			tapa::istream<int>& fifo_A_ptr,
-			tapa::istream<int>& csc_col_ptr,
-			tapa::istream<int>& csc_row_ind,
+			// tapa::istream<int>& csc_col_ptr,
+			// tapa::istream<int>& csc_row_ind,
 			tapa::ostream<int>& solver_row_ptr_a,
 			tapa::ostream<int>& solver_row_ptr_b,
 			tapa::ostream<int>& solver_col_ind,
 			tapa::ostream<float>& solver_val,
-			/* for csc mapping search*/
-			tapa::ostream<int>& solver_col_ptr,
-			tapa::ostream<int>& solver_row_ind,
+			// /* for csc mapping search*/
+			// tapa::ostream<int>& solver_col_ptr,
+			// tapa::ostream<int>& solver_row_ind,
 			tapa::istream<int>& N_in,
 			tapa::ostream<int>& N_out){
 
 	int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
 	int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
 
+round:
 		for(int round = 0; round < bound; round++){
 #pragma HLS loop_flatten off
 				const int N = N_in.read();
@@ -474,14 +454,19 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<64>>& fifo_A_ch,
 
 				float solver_val_arr[WINDOW_SIZE];
 				int solver_col_ind_arr[WINDOW_SIZE];
-				int solver_row_ind_arr[WINDOW_SIZE];
+				int solver_row_ptr_arr[WINDOW_SIZE];
+				// int solver_row_ind_arr[WINDOW_SIZE];
+				#pragma HLS array_partition variable=solver_val_arr cyclic factor=4
+				#pragma HLS array_partition variable=solver_col_ind_arr cyclic factor=4
 
 				const int K = fifo_A_ptr.read();
 				int prev_row = -1;
 				int row_ptr = 0;
-				int num_one_row = 0;
+				int row_ptr_ind = 0;
 				bool fifo_A_succ = false;
 				ap_uint<96> a_entry;
+
+load:
 				for(int i = 0; i < K;){
 					a_entry = fifo_A_ch.read(fifo_A_succ);
 					if(fifo_A_succ){
@@ -492,63 +477,59 @@ void PEG_split(int pe_i, int total_N, tapa::istream<ap_uint<64>>& fifo_A_ch,
 						//if(round == 0 && pe_i == 0) LOG(INFO) << "(" << (int)row << "," << (int) col << "): " << val_f;
 						if(row != (prev_row & 0xFFF)){
 							if(prev_row != -1){
-								solver_row_ptr_a.write(row_ptr);
-								solver_row_ptr_b.write(row_ptr);
-								for(int k = 0; k < num_one_row; k++){
-									solver_val.write(solver_val_arr[k]);
-									solver_col_ind.write(solver_col_ind_arr[k]);
-								}
-								num_one_row = 0;
+								solver_row_ptr_arr[row_ptr_ind] = row_ptr;
+								row_ptr_ind++;
 							}
 							prev_row = (int) 0 | row;
 						}
-						solver_val_arr[num_one_row] = val_f;
-						solver_col_ind_arr[num_one_row] = tapa::bit_cast<int>(col)-(pe_i+NUM_CH*round)*WINDOW_SIZE;
-						num_one_row++;
+						solver_val.write(val_f);
+						solver_col_ind.write(tapa::bit_cast<int>(col)-(pe_i+NUM_CH*round)*WINDOW_SIZE);
 						row_ptr++;
 						fifo_A_succ = false;
 						i++;
 					}
 				}
-				solver_row_ptr_a.write(row_ptr);
-				solver_row_ptr_b.write(row_ptr);
-				for(int k = 0; k < num_one_row; k++){
-					solver_val.write(solver_val_arr[k]);
-					solver_col_ind.write(solver_col_ind_arr[k]);
+
+				solver_row_ptr_arr[row_ptr_ind] = row_ptr;
+				row_ptr_ind++;
+
+				for(int i = 0; i < row_ptr_ind; i++){
+					solver_row_ptr_a.write(solver_row_ptr_arr[i]);
+					solver_row_ptr_b.write(solver_row_ptr_arr[i]);
 				}
 
-				int end_row = (pe_i+round*NUM_CH) * WINDOW_SIZE + N;
+				// int end_row = (pe_i+round*NUM_CH) * WINDOW_SIZE + N;
 
-				int csc_col_val = 0, csc_row_val = 0;
-				int prev = 0;
-				bool csc_col_ptr_succ = false, csc_row_ind_succ = false;
-				int solver_col_ptr_tmp = 0;
-				int num_one_col = 0;
-				for(int i = 0; i < N;){
-					csc_col_val = csc_col_ptr.read(csc_col_ptr_succ);
-					if(csc_col_ptr_succ) {
-						for(int j = 0; j < csc_col_val-prev;){
-							csc_row_val = csc_row_ind.read(csc_row_ind_succ);
-							if(csc_row_ind_succ){
-								if(csc_row_val < end_row) {
-									solver_row_ind_arr[num_one_col] = csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE;
-									num_one_col ++;
-									solver_col_ptr_tmp ++;
-								}
-								csc_row_ind_succ = false;
-								j++;
-							}
-						}
-						solver_col_ptr.write(solver_col_ptr_tmp);
-						for(int k = 0; k < num_one_col; k++){
-							solver_row_ind.write(solver_row_ind_arr[k]);
-						}
-						num_one_col = 0;
-						prev = csc_col_val;
-						csc_col_ptr_succ = false;
-						i++;
-					}
-				}
+				// int csc_col_val = 0, csc_row_val = 0;
+				// int prev = 0;
+				// bool csc_col_ptr_succ = false, csc_row_ind_succ = false;
+				// int solver_col_ptr_tmp = 0;
+				// int num_one_col = 0;
+				// for(int i = 0; i < N;){
+				// 	csc_col_val = csc_col_ptr.read(csc_col_ptr_succ);
+				// 	if(csc_col_ptr_succ) {
+				// 		for(int j = 0; j < csc_col_val-prev;){
+				// 			csc_row_val = csc_row_ind.read(csc_row_ind_succ);
+				// 			if(csc_row_ind_succ){
+				// 				if(csc_row_val < end_row) {
+				// 					solver_row_ind_arr[num_one_col] = csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE;
+				// 					num_one_col ++;
+				// 					solver_col_ptr_tmp ++;
+				// 				}
+				// 				csc_row_ind_succ = false;
+				// 				j++;
+				// 			}
+				// 		}
+				// 		solver_col_ptr.write(solver_col_ptr_tmp);
+				// 		for(int k = 0; k < num_one_col; k++){
+				// 			solver_row_ind.write(solver_row_ind_arr[k]);
+				// 		}
+				// 		num_one_col = 0;
+				// 		prev = csc_col_val;
+				// 		csc_col_ptr_succ = false;
+				// 		i++;
+				// 	}
+				// }
 		}
 }
 
@@ -782,12 +763,12 @@ void SolverMiddleware( int pe_i, int N,
 		tapa::stream<int> solver_col_ind("solver_col_ind");
 		tapa::stream<float> solver_val("solver_val");
 		/* for csc mapping search*/
-		tapa::stream<int> solver_col_ptr("solver_col_ptr");
-		tapa::stream<int> solver_row_ind("solver_row_ind");
+		// tapa::stream<int> solver_col_ptr("solver_col_ptr");
+		// tapa::stream<int> solver_row_ind("solver_row_ind");
 		tapa::stream<int> next("next");
     	tapa::stream<int> ack("ack");
 
-		tapa::stream<int> K_sub_csc("k_sub_csc");
+		tapa::streams<int, 3> K_sub_csc("k_sub_csc");
 		tapa::streams<int, 6> N_sub("n_sub");
 		tapa::stream<float> y("y");
 		tapa::stream<float, WINDOW_SIZE * NUM_CH> x_prev("x_prev");
@@ -799,24 +780,20 @@ void SolverMiddleware( int pe_i, int N,
 			.invoke<tapa::join>(read_float_vec, pe_i, N, f, N_val, N_sub, f_q)
 			.invoke<tapa::join>(read_int_vec, pe_i, N, csc_col_ptr, N_sub, N_sub, csc_col_ptr_q)
 		    .invoke<tapa::join>(read_int_vec, pe_i, N, csc_row_ind, K_csc_val, K_sub_csc, csc_row_ind_q)
-			.invoke<tapa::detach>(black_hole_int, K_sub_csc)
 			.invoke<tapa::join>(read_A_and_split, pe_i, N, csr_edge_list_ch, csr_edge_list_ptr, fifo_A_ch, fifo_A_ptr, spmv_val, spmv_inst)
 			.invoke<tapa::join>(X_bypass, pe_i, N, x_q_in, x_apt, x_bypass)
 			.invoke<tapa::join>(PEG_Xvec, pe_i, N, spmv_inst, spmv_val, x_apt, x_prev, y, N_sub, N_sub, block_id, req_x)
 			.invoke<tapa::join>(PEG_split, pe_i, N,
 				fifo_A_ch,
 				fifo_A_ptr,
-				csc_col_ptr_q,  
-				csc_row_ind_q, 
 				solver_row_ptr_a,
 				solver_row_ptr_b,
 				solver_col_ind,
 				solver_val,
-				solver_col_ptr,
-				solver_row_ind,
 				N_sub, N_sub)
-			.invoke<tapa::detach>(analyze, pe_i, solver_row_ptr_a, solver_col_ptr, solver_row_ind, ack, next, N_sub, N_sub) // ?
-			.invoke<tapa::detach>(solve_v2, pe_i, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub)
+			.invoke<tapa::detach>(analyze, solver_row_ptr_a, csc_col_ptr_q, csc_row_ind_q, ack, next, N_sub, N_sub, K_sub_csc, K_sub_csc) // ?
+			.invoke<tapa::detach>(solve_v2, next, ack, solver_row_ptr_b, solver_col_ind, solver_val, f_q, y, x_next, N_sub, N_sub, K_sub_csc, K_sub_csc)
+			.invoke<tapa::detach>(black_hole_int, K_sub_csc)
 			.invoke<tapa::join>(X_Merger, pe_i, N, x_prev, x_next, x_bypass, x_q_out, N_sub);
 	}
 
