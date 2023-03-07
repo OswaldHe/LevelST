@@ -58,11 +58,11 @@ void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istr
 }
 
 void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float>& mmap, int total_N){
-	int level = total_N / (WINDOW_SIZE*NUM_CH);
-	for(int i = 0; i < level; i++){
+	int num_block = total_N / WINDOW_SIZE;
+	for(int i = 0; i < num_block; i++){
 		//LOG(INFO) << "process level " << i << " ...";
-		int start = WINDOW_SIZE*NUM_CH*i;
-		int N = WINDOW_SIZE*NUM_CH;
+		int start = WINDOW_SIZE*i;
+		int N = WINDOW_SIZE;
 		for(int i_req = 0, i_resp = 0; i_resp < N;){
 			if(i_req < N && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
 				mmap.write_addr.try_write(i_req + start);
@@ -78,7 +78,7 @@ void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::asyn
 	}
 
 	//residue
-	int residue = total_N %(WINDOW_SIZE * NUM_CH);
+	int residue = total_N % WINDOW_SIZE;
 	for(int i_req = 0, i_resp = 0; i_resp < residue;){
 		if(i_req < residue && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
 			mmap.write_addr.try_write(i_req + total_N - residue);
@@ -141,7 +141,6 @@ round:
 			float local_res[WINDOW_SIZE];
 			float local_x[4][WINDOW_SIZE];
 
-#pragma HLS bind_storage variable=local_x latency=2
 #pragma HLS array_partition variable=local_x complete dim=1
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 #pragma HLS array_partition variable=local_res cyclic factor=4
@@ -158,28 +157,27 @@ load_x:
 			for(int ite = 0; ite < pe_i+round*NUM_CH; ite++){
 				const int N = fifo_inst_in.read();
 				//read x
-				bool x_val_succ = false;
 				if(ite < round * NUM_CH && N != 0){
 					block_id.write(ite);
 					for(int i = 0; i < WINDOW_SIZE;){
-						float x_val = req_x.read(x_val_succ);
-						if(x_val_succ){
+						if(!req_x.empty()){
+							float x_val; req_x.try_read(x_val);
 							for(int k = 0; k < 4; k++){
 								local_x[k][i] = x_val;
 							}
-							x_val_succ = false;
 							i++;
 						}
 					}
 				}else if(ite >= round * NUM_CH){
 					for(int i = 0; i < WINDOW_SIZE;){
-						float x_val = fifo_x_in.read(x_val_succ);
-						if(x_val_succ){
+						if(!fifo_x_in.empty()){
+							float x_val; fifo_x_in.try_read(x_val);
 							fifo_x_out.write(x_val);
-							for(int k = 0; k < 4; k++){
-								local_x[k][i] = x_val;
+							if(N != 0){
+								for(int k = 0; k < 4; k++){
+									local_x[k][i] = x_val;
+								}
 							}
-							x_val_succ = false;
 							i++;
 						}
 					}
@@ -497,39 +495,6 @@ load:
 					solver_row_ptr_a.write(solver_row_ptr_arr[i]);
 					solver_row_ptr_b.write(solver_row_ptr_arr[i]);
 				}
-
-				// int end_row = (pe_i+round*NUM_CH) * WINDOW_SIZE + N;
-
-				// int csc_col_val = 0, csc_row_val = 0;
-				// int prev = 0;
-				// bool csc_col_ptr_succ = false, csc_row_ind_succ = false;
-				// int solver_col_ptr_tmp = 0;
-				// int num_one_col = 0;
-				// for(int i = 0; i < N;){
-				// 	csc_col_val = csc_col_ptr.read(csc_col_ptr_succ);
-				// 	if(csc_col_ptr_succ) {
-				// 		for(int j = 0; j < csc_col_val-prev;){
-				// 			csc_row_val = csc_row_ind.read(csc_row_ind_succ);
-				// 			if(csc_row_ind_succ){
-				// 				if(csc_row_val < end_row) {
-				// 					solver_row_ind_arr[num_one_col] = csc_row_val-(pe_i+round*NUM_CH)*WINDOW_SIZE;
-				// 					num_one_col ++;
-				// 					solver_col_ptr_tmp ++;
-				// 				}
-				// 				csc_row_ind_succ = false;
-				// 				j++;
-				// 			}
-				// 		}
-				// 		solver_col_ptr.write(solver_col_ptr_tmp);
-				// 		for(int k = 0; k < num_one_col; k++){
-				// 			solver_row_ind.write(solver_row_ind_arr[k]);
-				// 		}
-				// 		num_one_col = 0;
-				// 		prev = csc_col_val;
-				// 		csc_col_ptr_succ = false;
-				// 		i++;
-				// 	}
-				// }
 		}
 }
 
@@ -672,7 +637,7 @@ void request_X(tapa::async_mmap<float>& mmap, tapa::istreams<int, NUM_CH>& block
 
 	int block = 0;
 	bool read_succ = false;
-	int level_done = 0;
+	int block_done = 0;
 
 init_cache_tag:
 	for(int i = 0; i < 4; i++) {
@@ -686,19 +651,19 @@ handle_request:
 		if(!fin_write.empty()){
 			bool last = fin_write.read(nullptr);
 			if(last){
-				level_done++;
+				block_done++;
 			}else{
 				for(int i = 0; i < 4; i++) {
 					cache_index[i] = -1;
 				}
-				level_done = 0;
+				block_done = 0;
 			}
 		}
 scan:
 		for(int i = 0; i < NUM_CH; i++){
 			if(!block_id[i].empty()){
 				block = block_id[i].peek(nullptr);
-				if(level_done*NUM_CH <= block) continue;
+				if(block_done <= block) continue;
 				else {
 					block_id[i].read(nullptr);
 					if(cache_index[block%4] == block){
