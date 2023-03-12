@@ -6,6 +6,8 @@
 #include <vector>
 #include <cmath>
 #include <tapa.h>
+#include <unordered_map>
+#include <queue>
 #include <gflags/gflags.h>
 #include "mmio.h"
 #include "sparse_helper.h"
@@ -15,18 +17,22 @@ using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
 constexpr int NUM_CH = 6;
-constexpr int WINDOW_SIZE = 512;
+constexpr int WINDOW_SIZE = 1024;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
 
 void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
-			tapa::mmaps<int, NUM_CH> csc_col_ptr, 
-			tapa::mmaps<int, NUM_CH> csc_row_ind, 
+			// tapa::mmaps<int, NUM_CH> csc_col_ptr, 
+			// tapa::mmaps<int, NUM_CH> csc_row_ind, 
+			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
+			tapa::mmaps<int, NUM_CH> dep_graph_ptr,
 			tapa::mmaps<float, NUM_CH> f, 
 			tapa::mmap<float> x, 
-			int N, tapa::mmap<int> K_csc);
+			int N
+			// tapa::mmap<int> K_csc
+			);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
 
@@ -128,6 +134,148 @@ void generate_edgelist_for_pes(int N,
 				}
 			}
 		}
+
+void generate_edgelist_spmv(
+	int N,
+	const aligned_vector<int>& csr_row_ptr,
+	const aligned_vector<int>& csr_col_ind,
+	const aligned_vector<float>& csr_val,
+	vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
+	vector<aligned_vector<int>>& edge_list_ptr
+){
+	int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	for(int i = 0; i < bound; i++){
+		vector<aligned_vector<ap_uint<64>>> tmp_edge_list(i+1);
+		for(int j = i*WINDOW_SIZE; j < (i+1)*WINDOW_SIZE && j < N; j++){
+			int start = (j == 0)? 0 : csr_row_ptr[j-1];
+			int end = csr_row_ptr[j];
+			for(int k = start; k < end; k++){
+				ap_uint<64> a = 0;
+				a(63, 52) = (ap_uint<12>)(j - i*WINDOW_SIZE & 0xFFF);
+				a(51, 32) = (ap_uint<20>)(csr_col_ind[k] & 0xFFFFF);
+				a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
+				tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE].push_back(a);
+			}
+		}
+		
+		//std::clog << "pe: " << i << std::endl;
+		for(int j = 0; j < i; j++){
+			//std::clog << tmp_edge_list[j].size() << std::endl;
+			edge_list_ptr[i%NUM_CH].push_back(tmp_edge_list[j].size());
+			for(int k = 0; k < tmp_edge_list[j].size(); k++){
+				edge_list_ch[i%NUM_CH].push_back(tmp_edge_list[j][k]);
+			}
+			int rest = tmp_edge_list[j].size() % 8 == 0 ? 0 : 8 - (tmp_edge_list[j].size() % 8);
+			for(int k = 0; k < rest; k ++){
+				ap_uint<64> a = 0;
+				a(63, 52) = (ap_uint<12>) 0xFFF;
+				edge_list_ch[i%NUM_CH].push_back(a);
+			}
+		}
+	}
+}
+
+void generate_dependency_graph_for_pes(
+	int N,
+	const aligned_vector<int>& csr_row_ptr,
+	const aligned_vector<int>& csr_col_ind,
+	const aligned_vector<float>& csr_val,
+	vector<aligned_vector<ap_uint<64>>>& dep_graph_ch,
+	vector<aligned_vector<int>>& dep_graph_ptr
+){
+	int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	for(int i = 0; i < bound; i++){
+		vector<int> csrRowPtr;
+		std::unordered_map<int, vector<edge<float>>> dep_map;
+
+		//extract csr
+		int row_ptr = 0;
+		for(int j = 0; j < WINDOW_SIZE && j < N - i * WINDOW_SIZE; j++){
+			int start = (i*WINDOW_SIZE+j == 0) ? 0:csr_row_ptr[i*WINDOW_SIZE+j-1];
+			for(int k = start; k < csr_row_ptr[i*WINDOW_SIZE+j]; k++){
+				if(csr_col_ind[k] >= i * WINDOW_SIZE){
+					int c = csr_col_ind[k] - i * WINDOW_SIZE;
+					float v = csr_val[k];
+					edge<float> e(c, j, v);
+					if(dep_map.find(c) == dep_map.end()){
+						vector<edge<float>> vec;
+						dep_map[c] = vec;
+					}
+					dep_map[c].push_back(e);
+					row_ptr++;
+				}
+			}
+			csrRowPtr.push_back(row_ptr);
+		}
+
+		//generate level-sets
+		vector<int> parents;
+		std::queue<int> roots;
+		int prev = 0;
+		for(int j = 0; j < WINDOW_SIZE && j < N - i * WINDOW_SIZE; j++){
+			parents.push_back(csrRowPtr[j]-prev-1);
+			if(csrRowPtr[j]-prev-1 == 0) {
+				roots.push(j);
+			}
+			prev = csrRowPtr[j];
+		}
+
+		int chunk_count = 0;
+		
+		while(!roots.empty()){
+			int size = roots.size();
+			vector<ap_uint<64>> nodes;
+			vector<ap_uint<64>> edge_list;
+			for(int j = 0; j < size; j++){
+				int root = roots.front();
+				for(auto e : dep_map[root]){
+					ap_uint<64> a;
+					a(61,47) = (ap_uint<15>)(e.row & 0x7FFF);
+					a(46,32) = (ap_uint<15>)(e.col & 0x7FFF);
+					a(31,0) = tapa::bit_cast<ap_uint<32>>(e.attr);
+					if(e.row == e.col){
+						a(63,62) = (ap_uint<2>)(1);
+						nodes.push_back(a);
+					}else{
+						a(63,62) = (ap_uint<2>)(0);
+						edge_list.push_back(a);
+						parents[e.row]--;
+						if(parents[e.row] == 0) {
+							roots.push(e.row);
+						}
+					}
+				}
+				roots.pop();
+			}
+			for(int j = 0; j < nodes.size(); j ++){
+				dep_graph_ch[i%NUM_CH].push_back(nodes[j]);
+			}
+			if(nodes.size() % 8 != 0) {
+				for(int j = 0; j < 8 - (nodes.size() % 8); j++){
+					ap_uint<64> a = 0;
+					a(63,62) = (ap_uint<2>)(2);
+					a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
+					dep_graph_ch[i%NUM_CH].push_back(a);
+				}
+				chunk_count++;
+			}
+			
+			for(int j = 0; j < edge_list.size(); j ++){
+				dep_graph_ch[i%NUM_CH].push_back(edge_list[j]);
+			}
+			if(edge_list.size() % 8 != 0) {
+				for(int j = 0; j < 8 - (edge_list.size() % 8); j++){
+					ap_uint<64> a = 0;
+					a(63,62) = (ap_uint<2>)(2);
+					dep_graph_ch[i%NUM_CH].push_back(a);
+				}
+				chunk_count++;
+			}
+			chunk_count += (nodes.size() / 8 )+ (edge_list.size() / 8);
+		}
+		dep_graph_ptr[i%NUM_CH].push_back(chunk_count);
+	}
+}
 
 void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, aligned_vector<int>& csr_col_ind, aligned_vector<float>& csr_val){
 	std::ifstream file(filename);
@@ -247,10 +395,13 @@ int main(int argc, char* argv[]){
 	//for kernel
 	vector<aligned_vector<int>> csc_col_ptr_fpga(NUM_CH);
 	vector<aligned_vector<int>> csc_row_ind_fpga(NUM_CH);
+	vector<aligned_vector<ap_uint<64>>> dep_graph_ch(NUM_CH);
+	vector<aligned_vector<int>> dep_graph_ptr(NUM_CH);
 
 	convertCSRToCSC(N, nnz, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
-	generate_edgelist_for_pes(N, IA, JA, A, edge_list_ch, edge_list_ptr);
-	
+	generate_edgelist_spmv(N, IA, JA, A, edge_list_ch, edge_list_ptr);
+	generate_dependency_graph_for_pes(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
+
 	// std::clog << K_csc[156] << std::endl;
 	// std::clog << edge_list_ptr[1].size() << std::endl;
 	// std::clog << csc_row_ind[2] << std::endl;
@@ -309,10 +460,14 @@ int main(int argc, char* argv[]){
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
                         tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(edge_list_ch).reinterpret<ap_uint<512>>(),
 						tapa::read_only_mmaps<int, NUM_CH>(edge_list_ptr),
-						tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
-						tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
+						tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(dep_graph_ch).reinterpret<ap_uint<512>>(),
+						tapa::read_only_mmaps<int, NUM_CH>(dep_graph_ptr),
+						// tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
+						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga),
-                        tapa::read_write_mmap<float>(x_fpga), N, tapa::read_only_mmap<int>(K_csc));
+                        tapa::read_write_mmap<float>(x_fpga), N
+						// tapa::read_only_mmap<int>(K_csc)
+						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
 	
