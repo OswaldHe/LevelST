@@ -151,8 +151,8 @@ void generate_edgelist_spmv(
 			int end = csr_row_ptr[j];
 			for(int k = start; k < end; k++){
 				ap_uint<64> a = 0;
-				a(63, 52) = (ap_uint<12>)(j - i*WINDOW_SIZE & 0xFFF);
-				a(51, 32) = (ap_uint<20>)(csr_col_ind[k] & 0xFFFFF);
+				a(63, 52) = (ap_uint<12>)((j - i*WINDOW_SIZE) & 0xFFF);
+				a(51, 32) = (ap_uint<20>)((csr_col_ind[k]%WINDOW_SIZE) & 0xFFFFF);
 				a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
 				tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE].push_back(a);
 			}
