@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <cassert>
 #include <tapa.h>
 #include <unordered_map>
 #include <queue>
@@ -28,7 +29,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			// tapa::mmaps<int, NUM_CH> csc_row_ind, 
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
 			tapa::mmaps<int, NUM_CH> dep_graph_ptr,
-			tapa::mmaps<float, NUM_CH> f, 
+			tapa::mmaps<float_v16, NUM_CH> f, 
 			tapa::mmap<float> x, 
 			int N
 			// tapa::mmap<int> K_csc
@@ -220,9 +221,11 @@ void generate_dependency_graph_for_pes(
 			prev = csrRowPtr[j];
 		}
 
-		int chunk_count = 0;
+		vector<int> inst;
 		
 		while(!roots.empty()){
+			int node_count = 0;
+			int edge_count = 0;
 			int size = roots.size();
 			vector<ap_uint<64>> nodes;
 			vector<ap_uint<64>> edge_list;
@@ -257,7 +260,7 @@ void generate_dependency_graph_for_pes(
 					a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
 					dep_graph_ch[i%NUM_CH].push_back(a);
 				}
-				chunk_count++;
+				node_count++;
 			}
 			
 			for(int j = 0; j < edge_list.size(); j ++){
@@ -269,11 +272,24 @@ void generate_dependency_graph_for_pes(
 					a(63,62) = (ap_uint<2>)(2);
 					dep_graph_ch[i%NUM_CH].push_back(a);
 				}
-				chunk_count++;
+				edge_count++;
 			}
-			chunk_count += (nodes.size() / 8 )+ (edge_list.size() / 8);
+			node_count += nodes.size() / 8;
+			edge_count += edge_list.size() / 8;
+			inst.push_back(node_count);
+			inst.push_back(edge_count);
 		}
-		dep_graph_ptr[i%NUM_CH].push_back(chunk_count);
+		assert(inst.size() % 2 == 0);
+		dep_graph_ptr[i%NUM_CH].push_back(inst.size()/2);
+		for(auto num : inst){
+			dep_graph_ptr[i%NUM_CH].push_back(num);
+		}
+
+	}
+
+	for(int i = 0; i < NUM_CH; i++){
+		int size = dep_graph_ptr[i].size();
+		dep_graph_ptr[i].insert(dep_graph_ptr[i].begin(), size);
 	}
 }
 
@@ -349,6 +365,14 @@ int main(int argc, char* argv[]){
 	for(int i = 0; i < N; i++){
 		f.push_back(i/10.0);
 	    f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
+	}
+
+	if((N % 16) != 0){
+		int index = ((N-1)/WINDOW_SIZE)% NUM_CH;
+		int rem = 16 - (N % 16);
+		for(int i = 0; i < rem; i++) {
+			f_fpga[index].push_back(0.0);
+		}
 	}
 
 	std::clog << M << std::endl;
@@ -464,7 +488,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmaps<int, NUM_CH>(dep_graph_ptr),
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
-						tapa::read_only_mmaps<float, NUM_CH>(f_fpga),
+						tapa::read_only_mmaps<float, NUM_CH>(f_fpga).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga), N
 						// tapa::read_only_mmap<int>(K_csc)
 						);
