@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <set>
 #include <cmath>
 #include <cassert>
 #include <tapa.h>
@@ -159,9 +160,9 @@ void generate_edgelist_spmv(
 			}
 		}
 		
-		//std::clog << "pe: " << i << std::endl;
+		// std::clog << "pe: " << i << std::endl;
 		for(int j = 0; j < i; j++){
-			//std::clog << tmp_edge_list[j].size() << std::endl;
+			// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
 			edge_list_ptr[i%NUM_CH].push_back(tmp_edge_list[j].size());
 			for(int k = 0; k < tmp_edge_list[j].size(); k++){
 				edge_list_ch[i%NUM_CH].push_back(tmp_edge_list[j][k]);
@@ -186,6 +187,7 @@ void generate_dependency_graph_for_pes(
 ){
 	int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 	for(int i = 0; i < bound; i++){
+		// std::clog << "level: " << i << std::endl;
 		vector<int> csrRowPtr;
 		std::unordered_map<int, vector<edge<float>>> dep_map;
 
@@ -263,19 +265,44 @@ void generate_dependency_graph_for_pes(
 				node_count++;
 			}
 			
-			for(int j = 0; j < edge_list.size(); j ++){
-				dep_graph_ch[i%NUM_CH].push_back(edge_list[j]);
-			}
-			if(edge_list.size() % 8 != 0) {
-				for(int j = 0; j < 8 - (edge_list.size() % 8); j++){
-					ap_uint<64> a = 0;
-					a(63,62) = (ap_uint<2>)(2);
-					dep_graph_ch[i%NUM_CH].push_back(a);
+			vector<ap_uint<64>> shift_edge_list;
+			int rem_edge_num = edge_list.size();
+			int push_edge_count = 0;
+			vector<bool> used_edge(rem_edge_num, false);
+			while(push_edge_count < rem_edge_num){
+				std::set<int> row;
+				std::set<int> col;
+				for(int n = 0; n < rem_edge_num; n++){
+					if(!used_edge[n]){
+						auto e = edge_list[n];
+						int row_i = (e(61,47) | (int) 0);
+						int col_i = (e(46,32) | (int) 0);
+						if(row.find(row_i) == row.end() && col.find(col_i) == col.end()){
+							row.insert(row_i);
+							col.insert(col_i);
+							shift_edge_list.push_back(edge_list[n]);
+							used_edge[n] = true;
+						}
+					}
+					if(row.size() == 8) break;
 				}
-				edge_count++;
+				if(row.size() < 8){
+					for(int n = 0; n < 8 - row.size(); n++){
+						ap_uint<64> a = 0;
+						a(63,62) = (ap_uint<2>)(2);
+						shift_edge_list.push_back(a);
+					}
+				}
+				push_edge_count += row.size();
+			}
+
+			for(int j = 0; j < shift_edge_list.size(); j ++){
+				dep_graph_ch[i%NUM_CH].push_back(shift_edge_list[j]);
 			}
 			node_count += nodes.size() / 8;
-			edge_count += edge_list.size() / 8;
+			edge_count += shift_edge_list.size() / 8;
+			// std::clog << "node: " << node_count << std::endl;
+			// std::clog << "edge: " << edge_count << std::endl;
 			inst.push_back(node_count);
 			inst.push_back(edge_count);
 		}

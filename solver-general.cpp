@@ -60,7 +60,7 @@ void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istr
 void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float>& mmap, int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
-	     LOG(INFO) << "process level " << i << " ...";
+	    // LOG(INFO) << "process level " << i << " ...";
 		int start = WINDOW_SIZE*i;
 		int N = WINDOW_SIZE;
 		for(int i_req = 0, i_resp = 0; i_resp < N;){
@@ -160,6 +160,7 @@ load_x:
 				if(N != 0){
 					block_id.write(ite);
 					for(int i = 0; i < WINDOW_SIZE;){
+						#pragma HLS pipeline II=1
 						if(!req_x.empty()){
 							float x_val; req_x.try_read(x_val);
 							for(int k = 0; k < 4; k++){
@@ -228,6 +229,7 @@ for(;;){
 
 read_f:
 	for(int i = 0; i < num_ite;){
+#pragma HLS pipeline II=1
 		if(!f.empty()){
 			float_v16 tmp_f; f.try_read(tmp_f);
 			for(int j = 0; j < 16; j++){
@@ -253,6 +255,7 @@ read_spmv_and_subtract:
 compute:
     for(int i = 0; i < N_layer; i++){
 		const int N_node = dep_graph_ptr.read();
+		const int N_edge = dep_graph_ptr.read();
 
 compute_node:
 		for(int j = 0; j < N_node;){
@@ -263,10 +266,10 @@ compute_node:
 				ap_uint<512> dep_block; dep_graph_ch.try_read(dep_block);
 
 				for(int k = 0; k < 8; k++){
+					#pragma HLS unroll
 					ap_uint<64> a = dep_block(64*k + 63, 64*k);
 					ap_uint<2> opcode = a(63,62);
 					ap_uint<15> row = a(61,47);
-					ap_uint<15> col = a(46,32);
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 1){
@@ -277,14 +280,16 @@ compute_node:
 			}
 		}
 
-		const int N_edge = dep_graph_ptr.read();
-
 compute_edge:
 		for(int j = 0; j < N_edge;){
+			#pragma HLS pipeline II=1
+			#pragma HLS dependence variable=local_x type=intra false
+			#pragma HLS dependence variable=local_y type=intra false
 			if(!dep_graph_ch.empty()){
 				ap_uint<512> dep_block; dep_graph_ch.try_read(dep_block);
 
 				for(int k = 0; k < 8; k++){
+					#pragma HLS unroll
 					ap_uint<64> a = dep_block(64*k + 63, 64*k);
 					ap_uint<2> opcode = a(63,62);
 					ap_uint<15> row = a(61,47);
@@ -324,6 +329,7 @@ round:
 #pragma HLS loop_flatten off
 traverse_block:
 			for(int i = 0; i < pe_i+NUM_CH*round; i++){
+				#pragma HLS pipeline II=1
 				const int N = csr_edge_list_ptr[i+offset_i];
 				const int num_ite = (N + 7) / 8;
 				spmv_inst.write(N);
@@ -360,9 +366,16 @@ round:
 			const int N_layer = dep_graph_ptr.read();
 			dep_graph_inst.write(N_layer);
 
-			for(int i = 0; i < N_layer*2; i++){
-				const int N_chunk = dep_graph_ptr.read();
-				dep_graph_inst.write(N_chunk);
+layer:
+			for(int i = 0; i < N_layer; i++){
+				#pragma HLS pipeline II=1 style=frp
+				const int N_node = dep_graph_ptr.read();
+				const int N_edge = dep_graph_ptr.read();
+				const int N_chunk = N_node + N_edge;
+
+				dep_graph_inst.write(N_node);
+				dep_graph_inst.write(N_edge);
+
 split:
 				for (int i_req = 0, i_resp = 0; i_resp < N_chunk;) {
 					if(i_req < N_chunk && !dep_graph_ch.read_addr.full()){
@@ -512,7 +525,7 @@ scan:
 						// read from bram
 	load_cache:
 						for(int j = 0; j < WINDOW_SIZE;){
-	#pragma HLS pipeline II=1
+	#pragma HLS pipeline II=1 style=frp
 	#pragma HLS loop_tripcount min=0 max=1024
 							if(!fifo_x_out[i].full()){
 								float x_f = local_cache_x[(block%4)*WINDOW_SIZE+j];
