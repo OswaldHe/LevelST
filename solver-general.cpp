@@ -4,6 +4,7 @@
 //#include <glog/logging.h>
 
 constexpr int WINDOW_SIZE = 1024;
+constexpr int WINDOW_SIZE_div_16 = 64;
 constexpr int NUM_CH = 6;
 
 using float_v16 = tapa::vec_t<float, 16>;
@@ -57,12 +58,34 @@ void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istr
 	}
 }
 
-void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float>& mmap, int total_N){
+void float_to_float_vec(int N, tapa::istream<float>& x, tapa::ostream<float_v16>& x_vec){
+	for(int i = 0; i < N / 16; i++){
+		float_v16 tmp;
+		for(int j = 0; j < 16;){
+			if(!x.empty()){
+				tmp[j] = x.read(nullptr);
+				j++;
+			}
+		}
+		x_vec.write(tmp);
+	}
+
+	float_v16 rem;
+	for(int i = 0; i < N % 16;){
+		if(!x.empty()){
+			rem[i] = x.read(nullptr);
+			i++;
+		}
+	}
+	x_vec.write(rem);
+}
+
+void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
 	    // LOG(INFO) << "process level " << i << " ...";
-		int start = WINDOW_SIZE*i;
-		int N = WINDOW_SIZE;
+		int start = WINDOW_SIZE_div_16*i;
+		int N = WINDOW_SIZE_div_16;
 		for(int i_req = 0, i_resp = 0; i_resp < N;){
 			if(i_req < N && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
 				mmap.write_addr.try_write(i_req + start);
@@ -78,10 +101,10 @@ void write_x(tapa::istream<float>& x, tapa::ostream<bool>& fin_write, tapa::asyn
 	}
 
 	//residue
-	int residue = total_N % WINDOW_SIZE;
+	int residue = ((total_N % WINDOW_SIZE) + 15)/16;
 	for(int i_req = 0, i_resp = 0; i_resp < residue;){
 		if(i_req < residue && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
-			mmap.write_addr.try_write(i_req + total_N - residue);
+			mmap.write_addr.try_write(i_req + num_block * WINDOW_SIZE_div_16);
 			mmap.write_data.try_write(x.read(nullptr));
 			++i_req;
 		}
@@ -126,7 +149,7 @@ void PEG_Xvec( int pe_i, int total_N,
 	tapa::istream<ap_uint<512>>& spmv_A, // 12-bit row + 20-bit col + 32-bit float
 	tapa::ostream<float>& fifo_y_out,
 	tapa::istream<int>& N_in, tapa::ostream<int>& N_out,
-	tapa::ostream<int>& block_id, tapa::istream<float>& req_x){
+	tapa::ostream<int>& block_id, tapa::istream<float_v16>& req_x){
 
 		int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
 		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
@@ -141,7 +164,7 @@ round:
 			float local_x[4][WINDOW_SIZE];
 
 #pragma HLS array_partition variable=local_x complete dim=1
-#pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
+#pragma HLS array_partition variable=local_x cyclic factor=16 dim=2
 #pragma HLS array_partition variable=local_res cyclic factor=8
 
 			//reset
@@ -159,13 +182,15 @@ load_x:
 				//read x
 				if(N != 0){
 					block_id.write(ite);
-					for(int i = 0; i < WINDOW_SIZE;){
+					for(int i = 0; i < WINDOW_SIZE_div_16;){
 						#pragma HLS pipeline II=1
 						if(!req_x.empty()){
-							float x_val; req_x.try_read(x_val);
-							for(int k = 0; k < 4; k++){
-								#pragma HLS unroll
-								local_x[k][i] = x_val;
+							float_v16 x_val; req_x.try_read(x_val);
+							for(int l = 0; l < 16; l++){
+								for(int k = 0; k < 4; k++){
+									#pragma HLS unroll
+									local_x[k][i*16+l] = x_val[l];
+								}
 							}
 							i++;
 						}
@@ -483,8 +508,8 @@ void fill_zero(tapa::ostream<float>& fifo_out){
 	fifo_out.try_write(0.0);
 }
 
-void request_X(tapa::async_mmap<float>& mmap, tapa::istreams<int, NUM_CH>& block_id, tapa::ostreams<float, NUM_CH>& fifo_x_out, tapa::istream<bool>& fin_write){
-	float local_cache_x[WINDOW_SIZE*4];
+void request_X(tapa::async_mmap<float_v16>& mmap, tapa::istreams<int, NUM_CH>& block_id, tapa::ostreams<float_v16, NUM_CH>& fifo_x_out, tapa::istream<bool>& fin_write){
+	float_v16 local_cache_x[WINDOW_SIZE/4];
 	int cache_index[4];
 
 #pragma HLS array_partition variable=local_cache_x cyclic factor=8
@@ -524,11 +549,11 @@ scan:
 					if(cache_index[block%4] == block){
 						// read from bram
 	load_cache:
-						for(int j = 0; j < WINDOW_SIZE;){
+						for(int j = 0; j < WINDOW_SIZE_div_16;){
 	#pragma HLS pipeline II=1 style=frp
 	#pragma HLS loop_tripcount min=0 max=1024
 							if(!fifo_x_out[i].full()){
-								float x_f = local_cache_x[(block%4)*WINDOW_SIZE+j];
+								float_v16 x_f = local_cache_x[(block%4)*WINDOW_SIZE_div_16+j];
 								fifo_x_out[i].try_write(x_f);
 								j++;
 							}
@@ -536,18 +561,18 @@ scan:
 					} else {
 						cache_index[block%4] = block;
 	load_x_to_cache:
-						for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE;){
+						for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
 	#pragma HLS pipeline II=1
 	#pragma HLS loop_tripcount min=0 max=1024
-							if(i_req < WINDOW_SIZE && !mmap.read_addr.full()){
-								mmap.read_addr.try_write(i_req+block*WINDOW_SIZE);
+							if(i_req < WINDOW_SIZE/16 && !mmap.read_addr.full()){
+								mmap.read_addr.try_write(i_req+block*WINDOW_SIZE_div_16);
 								++i_req;
 							}
 							if(!mmap.read_data.empty() && !fifo_x_out[i].full()){
-								float tmp;
+								float_v16 tmp;
 								mmap.read_data.try_read(tmp);
 								fifo_x_out[i].try_write(tmp);
-								local_cache_x[(block%4)*WINDOW_SIZE+i_resp] = tmp;
+								local_cache_x[(block%4)*WINDOW_SIZE_div_16+i_resp] = tmp;
 								++i_resp;
 							}
 						}
@@ -596,7 +621,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
 			tapa::mmaps<int, NUM_CH> dep_graph_ptr,
 			tapa::mmaps<float_v16, NUM_CH> f, 
-			tapa::mmap<float> x, 
+			tapa::mmap<float_v16> x, 
 			int N // # of dimension
 			){
 
@@ -604,7 +629,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<float, NUM_CH+1> x_q("x_pipe");
 	tapa::stream<bool> fin_write("fin_write");
 	tapa::streams<int, NUM_CH> block_id("block_id");
-	tapa::streams<float, NUM_CH> req_x("req_x");
+	tapa::streams<float_v16, NUM_CH> req_x("req_x");
 
 	tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_q("dep_graph_ch_q");
 	tapa::streams<int, NUM_CH> dep_graph_ptr_q("dep_graph_ptr_q");
@@ -619,6 +644,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<float, NUM_CH, WINDOW_SIZE * NUM_CH> x_next("x_next");
 	tapa::streams<float, NUM_CH, WINDOW_SIZE * NUM_CH> x_apt("x_apt");
 	tapa::streams<float, NUM_CH> x_bypass("x_bypass");
+	tapa::stream<float_v16> x_vec("x_vec");
 
 	tapa::task()
 		.invoke<tapa::join>(read_len, N, N_val)
@@ -633,5 +659,6 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join, NUM_CH>(PEG_Xvec, tapa::seq(), N, spmv_inst, spmv_val, y, N_sub_1, N_sub_2, block_id, req_x)
 		.invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, f_q, y, x_next, N_sub_2, N_sub_3)
 		.invoke<tapa::join, NUM_CH>(X_Merger, tapa::seq(), N, x_apt, x_next, x_bypass, x_q, N_sub_3)
-		.invoke<tapa::join>(write_x, x_q, fin_write, x, N);
+		.invoke<tapa::join>(float_to_float_vec, N, x_q, x_vec)
+		.invoke<tapa::join>(write_x, x_vec, fin_write, x, N);
 }

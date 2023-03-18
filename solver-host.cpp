@@ -31,7 +31,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
 			tapa::mmaps<int, NUM_CH> dep_graph_ptr,
 			tapa::mmaps<float_v16, NUM_CH> f, 
-			tapa::mmap<float> x, 
+			tapa::mmap<float_v16> x, 
 			int N
 			// tapa::mmap<int> K_csc
 			);
@@ -380,7 +380,7 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<ap_uint<64>>> edge_list_ch(NUM_CH);
 	vector<aligned_vector<int>> edge_list_ptr(NUM_CH);
 	vector<aligned_vector<float>> f_fpga(NUM_CH);
-	aligned_vector<float> x_fpga(N, 0.0);
+	aligned_vector<float> x_fpga(((N+15)/16)*16, 0.0);
 	aligned_vector<int> K_fpga;
 
 	// for(int i = 0; i < NUM_CH; i++){
@@ -516,7 +516,7 @@ int main(int argc, char* argv[]){
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga).reinterpret<float_v16>(),
-                        tapa::read_write_mmap<float>(x_fpga), N
+                        tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(), N
 						// tapa::read_only_mmap<int>(K_csc)
 						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;

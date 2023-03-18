@@ -8,7 +8,7 @@ tapac \
     --enable-synth-util \
     --run-floorplan-dse \
     --min-area-limit 0.54 \
-    --min-slr-width-limit 3000 \
+    --min-slr-width-limit 3500 \
     --max-parallel-synth-jobs 16 \
     --floorplan-output solver.tcl \
     solver-general.cpp 
