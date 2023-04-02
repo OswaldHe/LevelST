@@ -163,16 +163,35 @@ void generate_edgelist_spmv(
 		// std::clog << "pe: " << i << std::endl;
 		for(int j = 0; j < i; j++){
 			// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
-			edge_list_ptr[i%NUM_CH].push_back(tmp_edge_list[j].size());
-			for(int k = 0; k < tmp_edge_list[j].size(); k++){
-				edge_list_ch[i%NUM_CH].push_back(tmp_edge_list[j][k]);
+			int list_size = tmp_edge_list[j].size();
+			int total_size = 0;
+			vector<bool> used_edge(list_size, false);
+			for(int k = 0; k < list_size;){
+				std::set<int> row;
+				int pack_count = 0;
+				vector<ap_uint<64>> packet(8);
+				for(int l = 0; l < 8; l++){
+					ap_uint<64> a = 0;
+					a(63, 52) = (ap_uint<12>) 0xFFF;
+					packet[l] = a;
+				}
+				for(int l = 0; l < list_size; l++){
+					int row_i = (tmp_edge_list[j][l](63, 52) | (int) 0);
+					if(!used_edge[l] && row.find(row_i%8) == row.end()){
+						packet[row_i%8] = tmp_edge_list[j][l];
+						row.insert(row_i%8);
+						used_edge[l] = true;
+						pack_count++;
+						if(pack_count == 8) break;
+					}
+				}
+				k+= pack_count;
+				total_size += 8;
+				for(int l = 0; l < 8; l++){
+					edge_list_ch[i%NUM_CH].push_back(packet[l]);
+				}
 			}
-			int rest = tmp_edge_list[j].size() % 8 == 0 ? 0 : 8 - (tmp_edge_list[j].size() % 8);
-			for(int k = 0; k < rest; k ++){
-				ap_uint<64> a = 0;
-				a(63, 52) = (ap_uint<12>) 0xFFF;
-				edge_list_ch[i%NUM_CH].push_back(a);
-			}
+			edge_list_ptr[i%NUM_CH].push_back(total_size);
 		}
 	}
 }

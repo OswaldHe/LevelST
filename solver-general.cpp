@@ -223,7 +223,7 @@ compute:
 void PEG_YVec(int pe_i, int total_N,
 	tapa::istream<int>& fifo_inst_in,
 	tapa::istream<MultXVec>& fifo_aXVec,
-	tapa::ostream<float>& fifo_y_out,
+	tapa::ostream<float_v16>& fifo_y_out,
 	tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
 	int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
 	int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
@@ -236,7 +236,6 @@ round:
 
 			float local_c[8][WINDOW_SIZE];
 #pragma HLS array_partition variable=local_c complete dim=1
-#pragma HLS array_partition variable=local_c cyclic factor=8 dim=2
 
 reset:
 			for(int i = 0; i < num_x; i++){
@@ -252,9 +251,12 @@ load_axv:
 
 acc:
 				for(int i = 0; i < num_ite;){
+					#pragma HLS dependence variable=local_c type=intra false
+
 					if(!fifo_aXVec.empty()){
 						MultXVec ravx; fifo_aXVec.try_read(ravx);
 						for(int k = 0; k < 8; k++){
+							#pragma HLS unroll
 							auto a_row = ravx.row[k];
 							if(a_row[11] == 0){
 								local_c[k][a_row] += ravx.axv[k];
@@ -266,23 +268,72 @@ acc:
 			}
 
 write_y:
-			for(int i = 0; i < num_x; i++){
+			for(int i = 0; i < num_x; i+=16){
 #pragma HLS pipeline II=1
-				float_v8 tmp;
-				for(int j = 0; j < 8; j++){
-					tmp[j] = local_c[j][i];
+
+				float_v16 tmp;
+				for(int j = 0; j < 16; j++){
+					#pragma HLS unroll
+
+					tmp[j] = local_c[j%8][i+j];
 				}
-				float res = tapa::sum(tmp);
-				fifo_y_out.write(res);
+				fifo_y_out.write(tmp);
 			}
 			
 		}
 	}
 
+
+void Yvec_minus_f(tapa::istream<float_v16>& f,
+		tapa::istream<float_v16>& spmv_in, 
+		tapa::ostream<float_v16>& update_f,
+		tapa::istream<int>& N_in, tapa::ostream<int>& N_out){
+
+for(;;){
+#pragma HLS loop_flatten off
+			const int N = N_in.read();
+			N_out.write(N);
+			const int num_ite = (N+15)/16;
+
+			float local_y[WINDOW_SIZE];
+
+#pragma HLS array_partition cyclic variable=local_y factor=16
+
+read_f:
+			for(int i = 0; i < num_ite;){
+			#pragma HLS pipeline II=1
+				if(!f.empty()){
+					float_v16 tmp_f; f.try_read(tmp_f);
+					for(int j = 0; j < 16; j++){
+						#pragma HLS unroll
+						local_y[(i << 4)+j] = tmp_f[j];
+					}
+					i++;
+				}
+			}
+
+read_spmv_and_subtract:
+			for(int i = 0; i < num_ite;){
+			#pragma HLS loop_tripcount min=1 max=256
+			#pragma HLS dependence variable=local_y false
+			#pragma HLS pipeline II=1
+				if(!spmv_in.empty()){
+					float_v16 tmp_spmv; spmv_in.try_read(tmp_spmv);
+					float_v16 new_f;
+					for(int j = 0; j < 16; j++){
+						#pragma HLS unroll
+						new_f[j] = local_y[(i << 4) + j] - tmp_spmv[j];
+					}
+					update_f.write(new_f);
+					i++;
+				}
+			}
+		}
+	}
+
 void solve(tapa::istream<ap_uint<512>>& dep_graph_ch,
 		tapa::istream<int>& dep_graph_ptr,
-		tapa::istream<float_v16>& f,
-		tapa::istream<float>& spmv_in,
+		tapa::istream<float_v16>& y_in,
 		tapa::ostream<float>& x_out, 
 		tapa::istream<int>& N_in,
 		tapa::ostream<int>& N_out){
@@ -298,29 +349,17 @@ for(;;){
 	float local_y[WINDOW_SIZE];
 
 #pragma HLS array_partition cyclic variable=local_x factor=8
-#pragma HLS array_partition cyclic variable=local_y factor=8
+#pragma HLS array_partition cyclic variable=local_y factor=16
 
-read_f:
+read_y:
 	for(int i = 0; i < num_ite;){
 #pragma HLS pipeline II=1
-		if(!f.empty()){
-			float_v16 tmp_f; f.try_read(tmp_f);
+		if(!y_in.empty()){
+			float_v16 tmp_f; y_in.try_read(tmp_f);
 			for(int j = 0; j < 16; j++){
 				#pragma HLS unroll
-				local_y[(i << 4)+j] = tmp_f[j];
+				local_y[(i << 4) + j] = tmp_f[j];
 			}
-			i++;
-		}
-	}
-
-read_spmv_and_subtract:
-	for(int i = 0; i < N;){
-#pragma HLS loop_tripcount min=1 max=256
-#pragma HLS dependence variable=local_y false
-#pragma HLS pipeline II=1
-		if(!spmv_in.empty()){
-			float tmp_spmv; spmv_in.try_read(tmp_spmv);
-			local_y[i] -= tmp_spmv;
 			i++;
 		}
 	}
@@ -687,7 +726,9 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<int, NUM_CH> N_sub_1("n_sub_1");
 	tapa::streams<int, NUM_CH> N_sub_2("n_sub_2");
 	tapa::streams<int, NUM_CH> N_sub_3("n_sub_3");
-	tapa::streams<float, NUM_CH> y("y");
+	tapa::streams<int, NUM_CH> N_sub_4("n_sub_4");
+	tapa::streams<float_v16, NUM_CH> y("y");
+	tapa::streams<float_v16, NUM_CH> y_update("y_update");
 	tapa::streams<float, NUM_CH, WINDOW_SIZE * NUM_CH> x_next("x_next");
 	tapa::streams<float, NUM_CH, WINDOW_SIZE * NUM_CH> x_apt("x_apt");
 	tapa::streams<float, NUM_CH> x_bypass("x_bypass");
@@ -706,8 +747,9 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join, NUM_CH>(X_bypass, tapa::seq(), N, x_q, x_apt, x_bypass)
 		.invoke<tapa::join, NUM_CH>(PEG_Xvec, tapa::seq(), N, spmv_inst, spmv_inst_2, spmv_val, fifo_aXVec, block_id, req_x)
 		.invoke<tapa::join, NUM_CH>(PEG_YVec, tapa::seq(), N, spmv_inst_2, fifo_aXVec, y, N_sub_1, N_sub_2)
-		.invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, f_q, y, x_next, N_sub_2, N_sub_3)
-		.invoke<tapa::join, NUM_CH>(X_Merger, tapa::seq(), N, x_apt, x_next, x_bypass, x_q, N_sub_3)
+		.invoke<tapa::detach, NUM_CH>(Yvec_minus_f, f_q, y, y_update, N_sub_2, N_sub_3)
+		.invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, y_update, x_next, N_sub_3, N_sub_4)
+		.invoke<tapa::join, NUM_CH>(X_Merger, tapa::seq(), N, x_apt, x_next, x_bypass, x_q, N_sub_4)
 		.invoke<tapa::join>(float_to_float_vec, N, x_q, x_vec)
 		.invoke<tapa::join>(write_x, x_vec, fin_write, x, N);
 }
