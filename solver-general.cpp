@@ -5,7 +5,7 @@
 
 constexpr int WINDOW_SIZE = 1024;
 constexpr int WINDOW_SIZE_div_16 = 64;
-constexpr int NUM_CH = 6;
+constexpr int NUM_CH = 7;
 
 using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
@@ -62,28 +62,6 @@ void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istr
 		offset += N;
 	}
 }
-
-// void float_to_float_vec(int N, tapa::istream<float>& x, tapa::ostream<float_v16>& x_vec){
-// 	for(int i = 0; i < N / 16; i++){
-// 		float_v16 tmp;
-// 		for(int j = 0; j < 16;){
-// 			if(!x.empty()){
-// 				tmp[j] = x.read(nullptr);
-// 				j++;
-// 			}
-// 		}
-// 		x_vec.write(tmp);
-// 	}
-
-// 	float_v16 rem;
-// 	for(int i = 0; i < N % 16;){
-// 		if(!x.empty()){
-// 			rem[i] = x.read(nullptr);
-// 			i++;
-// 		}
-// 	}
-// 	x_vec.write(rem);
-// }
 
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, int total_N){
 	int num_block = total_N / WINDOW_SIZE;
@@ -235,8 +213,9 @@ round:
 			N_out.write(num_x);
 
 			float local_c[8][WINDOW_SIZE];
+#pragma HLS bind_storage variable=local_c type=RAM_2P impl=URAM
 #pragma HLS array_partition variable=local_c complete dim=1
-#pragma HLS array_partition variable=local_c cyclic factor=16 dim=2
+#pragma HLS array_partition variable=local_c cyclic factor=2 dim=2
 
 reset:
 			for(int i = 0; i < num_x; i++){
@@ -435,7 +414,7 @@ write_x:
 
 void read_A_and_split(int pe_i, int total_N,
 	tapa::async_mmap<ap_uint<512>>& csr_edge_list_ch,
-	tapa::mmap<int> csr_edge_list_ptr,
+	tapa::istream<int>& csr_edge_list_ptr,
 	tapa::ostream<ap_uint<512>>& spmv_val,
 	tapa::ostream<int>& spmv_inst){
 		int offset = 0;
@@ -445,10 +424,12 @@ void read_A_and_split(int pe_i, int total_N,
 round:
 		for(int round = 0;round < bound;round++){
 #pragma HLS loop_flatten off
+			const int block_N = csr_edge_list_ptr.read();
+
 traverse_block:
-			for(int i = 0; i < pe_i+NUM_CH*round; i++){
+			for(int i = 0; i < block_N; i++){
 				#pragma HLS pipeline II=1
-				const int N = csr_edge_list_ptr[i+offset_i];
+				const int N = csr_edge_list_ptr.read();
 				const int num_ite = (N + 7) / 8;
 				spmv_inst.write(N);
 split:
@@ -512,31 +493,123 @@ split:
 		}
 	}
 
-void read_dep_graph_ptr(int pe_i, int total_N,
-	tapa::async_mmap<int>& dep_graph_ptr,
-	tapa::ostream<int>& dep_graph_ptr_q){
+void split_ptr_inst(int pe_i, int total_N,
+	tapa::istream<int>& merge_inst_q,
+	tapa::ostream<int>& dep_graph_ptr_q,
+	tapa::ostream<int>& csr_edge_list_ptr_q){
+		int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
+		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
+
+		for(int round = 0; round < bound; round++){
+			const int spmv_N = merge_inst_q.read();
+			const int dep_graph_N = merge_inst_q.read();
+			csr_edge_list_ptr_q.write(spmv_N);
+			dep_graph_ptr_q.write(dep_graph_N);
+
+			const int dep_graph_ite = dep_graph_N * 2;
+
+			for(int i = 0; i < spmv_N;){
+				if(!merge_inst_q.empty()){
+					int tmp; merge_inst_q.try_read(tmp);
+					csr_edge_list_ptr_q.write(tmp);
+					i++;
+				}
+			}
+			for(int i = 0; i < dep_graph_ite;){
+				if(!merge_inst_q.empty()){
+					int tmp; merge_inst_q.try_read(tmp);
+					dep_graph_ptr_q.write(tmp);
+					i++;
+				}
+			}
+		}
+	}
+
+// void read_dep_graph_ptr(int pe_i, int total_N,
+// 	tapa::async_mmap<int>& dep_graph_ptr,
+// 	tapa::ostream<int>& dep_graph_ptr_q){
+// 		int N = 0;
+// 		for (int i_req = 0, i_resp = 0; i_resp < 1;) {
+// 			if(i_req < 1 && !dep_graph_ptr.read_addr.full()){
+// 					dep_graph_ptr.read_addr.try_write(i_req);
+// 					++i_req;
+// 			}
+// 			if(!dep_graph_ptr.read_data.empty()){
+// 				int tmp;
+// 				dep_graph_ptr.read_data.try_read(tmp);
+// 				N = tmp;
+// 				++i_resp;
+// 			}
+// 		}
+// 		for (int i_req = 0, i_resp = 0; i_resp < N;) {
+// 			if(i_req < N && !dep_graph_ptr.read_addr.full()){
+// 					dep_graph_ptr.read_addr.try_write(i_req+1);
+// 					++i_req;
+// 			}
+// 			if(!dep_graph_ptr.read_data.empty()){
+// 				int tmp;
+// 				dep_graph_ptr.read_data.try_read(tmp);
+// 				dep_graph_ptr_q.write(tmp);
+// 				++i_resp;
+// 			}
+// 		}
+// 	}
+
+// void read_A_ptr(int pe_i, int total_N,
+// 	tapa::async_mmap<int>& csr_edge_list_ptr,
+// 	tapa::ostream<int>& csr_edge_list_ptr_q){
+// 		int N = 0;
+// 		for (int i_req = 0, i_resp = 0; i_resp < 1;) {
+// 			if(i_req < 1 && !csr_edge_list_ptr.read_addr.full()){
+// 					csr_edge_list_ptr.read_addr.try_write(i_req);
+// 					++i_req;
+// 			}
+// 			if(!csr_edge_list_ptr.read_data.empty()){
+// 				int tmp;
+// 				csr_edge_list_ptr.read_data.try_read(tmp);
+// 				N = tmp;
+// 				++i_resp;
+// 			}
+// 		}
+// 		for (int i_req = 0, i_resp = 0; i_resp < N;) {
+// 			if(i_req < N && !csr_edge_list_ptr.read_addr.full()){
+// 					csr_edge_list_ptr.read_addr.try_write(i_req+1);
+// 					++i_req;
+// 			}
+// 			if(!csr_edge_list_ptr.read_data.empty()){
+// 				int tmp;
+// 				csr_edge_list_ptr.read_data.try_read(tmp);
+// 				csr_edge_list_ptr_q.write(tmp);
+// 				++i_resp;
+// 			}
+// 		}
+// 	}
+
+void read_all_ptr(
+	tapa::async_mmap<int>& merge_inst_ptr,
+	tapa::ostream<int>& merge_inst_q){
 		int N = 0;
 		for (int i_req = 0, i_resp = 0; i_resp < 1;) {
-			if(i_req < 1 && !dep_graph_ptr.read_addr.full()){
-					dep_graph_ptr.read_addr.try_write(i_req);
+			if(i_req < 1 && !merge_inst_ptr.read_addr.full()){
+					merge_inst_ptr.read_addr.try_write(i_req);
 					++i_req;
 			}
-			if(!dep_graph_ptr.read_data.empty()){
+			if(!merge_inst_ptr.read_data.empty()){
 				int tmp;
-				dep_graph_ptr.read_data.try_read(tmp);
+				merge_inst_ptr.read_data.try_read(tmp);
 				N = tmp;
 				++i_resp;
 			}
 		}
 		for (int i_req = 0, i_resp = 0; i_resp < N;) {
-			if(i_req < N && !dep_graph_ptr.read_addr.full()){
-					dep_graph_ptr.read_addr.try_write(i_req+1);
+			if(i_req < N && !merge_inst_ptr.read_addr.full()){
+					merge_inst_ptr.read_addr.try_write(i_req+1);
 					++i_req;
 			}
-			if(!dep_graph_ptr.read_data.empty()){
+			if(!merge_inst_ptr.read_data.empty()){
 				int tmp;
-				dep_graph_ptr.read_data.try_read(tmp);
-				dep_graph_ptr_q.write(tmp);
+				merge_inst_ptr.read_data.try_read(tmp);
+				merge_inst_q.write(tmp);
 				++i_resp;
 			}
 		}
@@ -690,43 +763,11 @@ scan:
 	}
 }
 
-// void SolverMiddleware( int pe_i, int N,
-// 	tapa::mmap<ap_uint<512>> csr_edge_list_ch,
-// 	tapa::mmap<int> csr_edge_list_ptr,
-// 	tapa::mmap<float_v16> f,
-// 	tapa::mmap<ap_uint<512>> dep_graph_ch,
-// 	tapa::mmap<int> dep_graph_ptr,
-// 	tapa::istream<float>& x_q_in,
-// 	tapa::ostream<float>& x_q_out,
-// 	tapa::istream<int>& N_val,
-// 	tapa::ostream<int>& block_id,
-// 	tapa::istream<float>& req_x){
-		
-// 		tapa::stream<ap_uint<512>> dep_graph_ch_q("dep_graph_ch_q");
-// 		tapa::stream<int> dep_graph_ptr_q("dep_graph_ptr_q");
-// 		tapa::stream<float_v16> f_q("f");
-// 		tapa::stream<ap_uint<512>> spmv_val("spmv_val");
-// 		tapa::stream<int> spmv_inst("spmv_inst");
-// 		tapa::streams<int, 3> N_sub("n_sub");
-// 		tapa::stream<float> y("y");
-// 		tapa::stream<float, WINDOW_SIZE * NUM_CH> x_next("x_next");
-// 		tapa::stream<float, WINDOW_SIZE * NUM_CH> x_apt("x_apt");
-// 		tapa::stream<float> x_bypass("x_bypass");
-
-// 		tapa::task()
-// 			.invoke<tapa::join>(read_float_vec, pe_i, N, f, N_val, N_sub, f_q)
-// 			.invoke<tapa::join>(read_A_and_split, pe_i, N, csr_edge_list_ch, csr_edge_list_ptr, spmv_val, spmv_inst)
-// 			.invoke<tapa::join>(read_dep_graph, pe_i, N, dep_graph_ch, dep_graph_ptr, dep_graph_ch_q, dep_graph_ptr_q)
-// 			.invoke<tapa::join>(X_bypass, pe_i, N, x_q_in, x_apt, x_bypass)
-// 			.invoke<tapa::join>(PEG_Xvec, pe_i, N, spmv_inst, spmv_val, y, N_sub, N_sub, block_id, req_x)
-// 			.invoke<tapa::detach>(solve, dep_graph_ch_q, dep_graph_ptr_q, f_q, y, x_next, N_sub, N_sub)
-// 			.invoke<tapa::join>(X_Merger, pe_i, N, x_apt, x_next, x_bypass, x_q_out, N_sub);
-// 	}
-
 void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
-			tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
+			// tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
-			tapa::mmaps<int, NUM_CH> dep_graph_ptr,
+			// tapa::mmaps<int, NUM_CH> dep_graph_ptr,
+			tapa::mmaps<int, NUM_CH> merge_inst_ptr,
 			tapa::mmaps<float_v16, NUM_CH> f, 
 			tapa::mmap<float_v16> x, 
 			int N // # of dimension
@@ -738,11 +779,13 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<int, NUM_CH> block_id("block_id");
 	tapa::streams<float_v16, NUM_CH> req_x("req_x");
 
+	tapa::streams<int, NUM_CH> merge_inst_q("merge_inst_q");
 	tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_q("dep_graph_ch_q");
 	tapa::streams<int, NUM_CH> dep_graph_ptr_q("dep_graph_ptr_q");
 	tapa::streams<int, NUM_CH> dep_graph_inst("dep_graph_inst");
 	tapa::streams<float_v16, NUM_CH> f_q("f");
 	tapa::streams<ap_uint<512>, NUM_CH> spmv_val("spmv_val");
+	tapa::streams<int, NUM_CH> csr_edge_list_ptr_q("csr_edge_list_ptr_q");
 	tapa::streams<int, NUM_CH> spmv_inst("spmv_inst");
 	tapa::streams<int, NUM_CH> spmv_inst_2("spmv_inst_2");
 	tapa::streams<int, NUM_CH> N_sub_1("n_sub_1");
@@ -760,10 +803,12 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join>(read_len, N, N_val)
 		.invoke<tapa::join>(fill_zero, x_q)
 		.invoke<tapa::detach>(request_X, x, block_id, req_x, fin_write)
-		// .invoke<tapa::join, NUM_CH>(SolverMiddleware, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr, f, dep_graph_ch, dep_graph_ptr, x_q, x_q, N_val, block_id, req_x)
 		.invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
-		.invoke<tapa::join, NUM_CH>(read_A_and_split, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr, spmv_val, spmv_inst)
-		.invoke<tapa::join, NUM_CH>(read_dep_graph_ptr, tapa::seq(), N, dep_graph_ptr, dep_graph_ptr_q)
+		.invoke<tapa::join, NUM_CH>(read_all_ptr, merge_inst_ptr, merge_inst_q)
+		.invoke<tapa::join, NUM_CH>(split_ptr_inst, tapa::seq(), N, merge_inst_q, dep_graph_ptr_q, csr_edge_list_ptr_q)
+		// .invoke<tapa::join, NUM_CH>(read_A_ptr, tapa::seq(), N, csr_edge_list_ptr, csr_edge_list_ptr_q)
+		.invoke<tapa::join, NUM_CH>(read_A_and_split, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr_q, spmv_val, spmv_inst)
+		// .invoke<tapa::join, NUM_CH>(read_dep_graph_ptr, tapa::seq(), N, dep_graph_ptr, dep_graph_ptr_q)
 		.invoke<tapa::join, NUM_CH>(read_dep_graph, tapa::seq(), N, dep_graph_ch, dep_graph_ptr_q, dep_graph_ch_q, dep_graph_inst)
 		.invoke<tapa::join, NUM_CH>(X_bypass, tapa::seq(), N, x_q, x_apt, x_bypass)
 		.invoke<tapa::join, NUM_CH>(PEG_Xvec, tapa::seq(), N, spmv_inst, spmv_inst_2, spmv_val, fifo_aXVec, block_id, req_x)

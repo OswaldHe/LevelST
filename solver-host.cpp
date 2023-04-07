@@ -18,18 +18,17 @@ using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
-constexpr int NUM_CH = 6;
+constexpr int NUM_CH = 7;
 constexpr int WINDOW_SIZE = 1024;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
 
 void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
-			tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
-			// tapa::mmaps<int, NUM_CH> csc_col_ptr, 
-			// tapa::mmaps<int, NUM_CH> csc_row_ind, 
+			// tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
-			tapa::mmaps<int, NUM_CH> dep_graph_ptr,
+			// tapa::mmaps<int, NUM_CH> dep_graph_ptr,
+			tapa::mmaps<int, NUM_CH> merge_inst_ptr,
 			tapa::mmaps<float_v16, NUM_CH> f, 
 			tapa::mmap<float_v16> x, 
 			int N
@@ -194,6 +193,10 @@ void generate_edgelist_spmv(
 			edge_list_ptr[i%NUM_CH].push_back(total_size);
 		}
 	}
+	// for(int i = 0; i < NUM_CH; i++){
+	// 	int size = edge_list_ptr[i].size();
+	// 	edge_list_ptr[i].insert(edge_list_ptr[i].begin(), size);
+	// }
 }
 
 void generate_dependency_graph_for_pes(
@@ -333,9 +336,37 @@ void generate_dependency_graph_for_pes(
 
 	}
 
-	for(int i = 0; i < NUM_CH; i++){
-		int size = dep_graph_ptr[i].size();
-		dep_graph_ptr[i].insert(dep_graph_ptr[i].begin(), size);
+	// for(int i = 0; i < NUM_CH; i++){
+	// 	int size = dep_graph_ptr[i].size();
+	// 	dep_graph_ptr[i].insert(dep_graph_ptr[i].begin(), size);
+	// }
+}
+
+void merge_ptr(int N,
+	vector<aligned_vector<int>>& dep_graph_ptr,
+	vector<aligned_vector<int>>& edge_list_ptr,
+	vector<aligned_vector<int>>& merge_inst_ptr){
+	
+	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
+		int edge_list_offset = 0;
+		int dep_graph_offset = 0;
+		for(int round = 0; round < bound; round++){
+			merge_inst_ptr[pe_i].push_back(pe_i+NUM_CH*round);
+			int N_level = dep_graph_ptr[pe_i][dep_graph_offset++];
+			merge_inst_ptr[pe_i].push_back(N_level);
+			for(int i = 0; i < pe_i+NUM_CH*round; i++){
+				merge_inst_ptr[pe_i].push_back(edge_list_ptr[pe_i][i+edge_list_offset]);
+			}
+			edge_list_offset+=pe_i+NUM_CH*round;
+			for(int i = 0; i < N_level*2; i++){
+				merge_inst_ptr[pe_i].push_back(dep_graph_ptr[pe_i][i+dep_graph_offset]);
+			}
+			dep_graph_offset+= N_level*2;
+		}
+		int size = merge_inst_ptr[pe_i].size();
+		merge_inst_ptr[pe_i].insert(merge_inst_ptr[pe_i].begin(), size);
 	}
 }
 
@@ -467,10 +498,12 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<int>> csc_row_ind_fpga(NUM_CH);
 	vector<aligned_vector<ap_uint<64>>> dep_graph_ch(NUM_CH);
 	vector<aligned_vector<int>> dep_graph_ptr(NUM_CH);
+	vector<aligned_vector<int>> merge_inst_ptr(NUM_CH);
 
 	convertCSRToCSC(N, nnz, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
 	generate_edgelist_spmv(N, IA, JA, A, edge_list_ch, edge_list_ptr);
 	generate_dependency_graph_for_pes(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
+	merge_ptr(N, dep_graph_ptr, edge_list_ptr, merge_inst_ptr);
 
 	// std::clog << K_csc[156] << std::endl;
 	// std::clog << edge_list_ptr[1].size() << std::endl;
@@ -529,11 +562,12 @@ int main(int argc, char* argv[]){
 
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
                         tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(edge_list_ch).reinterpret<ap_uint<512>>(),
-						tapa::read_only_mmaps<int, NUM_CH>(edge_list_ptr),
+						// tapa::read_only_mmaps<int, NUM_CH>(edge_list_ptr),
 						tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(dep_graph_ch).reinterpret<ap_uint<512>>(),
-						tapa::read_only_mmaps<int, NUM_CH>(dep_graph_ptr),
+						// tapa::read_only_mmaps<int, NUM_CH>(dep_graph_ptr),
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
+						tapa::read_only_mmaps<int, NUM_CH>(merge_inst_ptr),
 						tapa::read_only_mmaps<float, NUM_CH>(f_fpga).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(), N
 						// tapa::read_only_mmap<int>(K_csc)
