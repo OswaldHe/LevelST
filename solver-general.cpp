@@ -343,11 +343,11 @@ for(;;){
 	const int N_layer = dep_graph_ptr.read();
 	const int num_ite = (N + 15) / 16;
 
-	float local_x[WINDOW_SIZE];
-	float local_y[WINDOW_SIZE];
+	float local_x[8][WINDOW_SIZE];
+	float local_y[8][WINDOW_SIZE];
 
-#pragma HLS array_partition cyclic variable=local_x factor=8
-#pragma HLS array_partition cyclic variable=local_y factor=16
+#pragma HLS array_partition complete variable=local_x dim=1
+#pragma HLS array_partition complete variable=local_y dim=1
 
 read_y:
 	for(int i = 0; i < num_ite;){
@@ -356,7 +356,7 @@ read_y:
 			float_v16 tmp_f; y_in.try_read(tmp_f);
 			for(int j = 0; j < 16; j++){
 				#pragma HLS unroll
-				local_y[(i << 4) + j] = tmp_f[j];
+				local_y[j%8][(i << 4) + j] = tmp_f[j];
 			}
 			i++;
 		}
@@ -383,7 +383,10 @@ compute_node:
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 1){
-						local_x[row] = local_y[row] * val_f;
+						float ans = local_y[k][row] * val_f;
+						for(int l = 0; l < 8; l++){
+							local_x[l][row] = ans;
+						}
 					}
 				}
 				j++;
@@ -407,7 +410,7 @@ compute_edge:
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 0){
-						local_y[row] -= (local_x[col] * val_f);
+						local_y[k][row] -= (local_x[k][col] * val_f);
 					}
 				}
 				j++;
@@ -423,7 +426,7 @@ write_x:
 		float_v16 tmp_x;
 		for(int j = 0; j < 16; j++){
 		#pragma HLS unroll
-			tmp_x[j] = local_x[(i << 4)+j];
+			tmp_x[j] = local_x[j/2][(i << 4)+j];
 		}
 		x_out.write(tmp_x);
 	}
@@ -672,9 +675,6 @@ handle_request:
 			if(last){
 				block_done++;
 			}else{
-				// for(int i = 0; i < 4; i++) {
-				// 	cache_index[i] = -1;
-				// }
 				block_done = 0;
 			}
 		}
@@ -685,19 +685,6 @@ scan:
 				if(block_done <= block) continue;
 				else {
 					block_id[i].read(nullptr);
-	// 				if(cache_index[block%4] == block){
-	// 					// read from bram
-	// load_cache:
-	// 					for(int j = (block%4)*WINDOW_SIZE_div_16; j < (block%4+1)*WINDOW_SIZE_div_16;){
-	// #pragma HLS pipeline II=1
-	// #pragma HLS loop_tripcount min=0 max=1024
-	// 						if(!fifo_x_out[i].full()){
-	// 							fifo_x_out[i].try_write(local_cache_x[j]);
-	// 							j++;
-	// 						}
-	// 					}
-	// 				} else {
-						// cache_index[block%4] = block;
 	load_x_to_cache:
 						for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
 	#pragma HLS pipeline II=1
@@ -710,11 +697,9 @@ scan:
 								float_v16 tmp;
 								mmap.read_data.try_read(tmp);
 								fifo_x_out[i].try_write(tmp);
-								// local_cache_x[(block%4)*WINDOW_SIZE_div_16+i_resp] = tmp;
 								++i_resp;
 							}
 						}
-					// }
 				}
 			}
 		}

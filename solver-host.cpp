@@ -274,55 +274,90 @@ void generate_dependency_graph_for_pes(
 				}
 				roots.pop();
 			}
-			for(int j = 0; j < nodes.size(); j ++){
-				dep_graph_ch[i%NUM_CH].push_back(nodes[j]);
-			}
-			if(nodes.size() % 8 != 0) {
-				for(int j = 0; j < 8 - (nodes.size() % 8); j++){
+			// for(int j = 0; j < nodes.size(); j ++){
+			// 	dep_graph_ch[i%NUM_CH].push_back(nodes[j]);
+			// }
+			// if(nodes.size() % 8 != 0) {
+			// 	for(int j = 0; j < 8 - (nodes.size() % 8); j++){
+			// 		ap_uint<64> a = 0;
+			// 		a(63,62) = (ap_uint<2>)(2);
+			// 		a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
+			// 		dep_graph_ch[i%NUM_CH].push_back(a);
+			// 	}
+			// 	node_count++;
+			// }
+			int rem_node_num = nodes.size();
+			int pushed_node_count = 0;
+			vector<bool> used_node(rem_node_num, false);
+			while(rem_node_num > pushed_node_count){
+				std::set<int> row;
+				vector<ap_uint<64>> packet(8);
+				for(int n = 0; n < 8; n++){
 					ap_uint<64> a = 0;
 					a(63,62) = (ap_uint<2>)(2);
 					a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
-					dep_graph_ch[i%NUM_CH].push_back(a);
+					packet[n] = a;
+				}
+				for(int n = 0; n < rem_node_num; n++){
+					if(!used_node[n]){
+						auto nd = nodes[n];
+						int row_i = (nd(61,47) | (int) 0);
+						if(row.find(row_i % 8) == row.end()){
+							row.insert(row_i % 8);
+							packet[row_i % 8] = nd;
+							used_node[n] = true;
+							pushed_node_count++;
+						}
+					}
+					if(row.size() == 8) break;
+				}
+				for(int n = 0; n < 8; n++){
+					dep_graph_ch[i % NUM_CH].push_back(packet[n]);
 				}
 				node_count++;
 			}
 			
-			vector<ap_uint<64>> shift_edge_list;
 			int rem_edge_num = edge_list.size();
-			int push_edge_count = 0;
+			int pushed_edge_count = 0;
 			vector<bool> used_edge(rem_edge_num, false);
-			while(push_edge_count < rem_edge_num){
+			while(pushed_edge_count < rem_edge_num){
 				std::set<int> row;
-				std::set<int> col;
+				// std::set<int> col;
+				vector<ap_uint<64>> packet(8);
+				for(int n = 0; n < 8; n++){
+					ap_uint<64> a = 0;
+					a(63,62) = (ap_uint<2>)(2);
+					packet[n] = a;
+				}
 				for(int n = 0; n < rem_edge_num; n++){
 					if(!used_edge[n]){
 						auto e = edge_list[n];
 						int row_i = (e(61,47) | (int) 0);
-						int col_i = (e(46,32) | (int) 0);
-						if(row.find(row_i) == row.end() && col.find(col_i) == col.end()){
-							row.insert(row_i);
-							col.insert(col_i);
-							shift_edge_list.push_back(edge_list[n]);
+						// int col_i = (e(46,32) | (int) 0);
+						if(row.find(row_i%8) == row.end() 
+						// && col.find(col_i) == col.end()
+						){
+							row.insert(row_i%8);
+							packet[row_i % 8] = e;
+							// col.insert(col_i);
+							// shift_edge_list.push_back(edge_list[n]);
 							used_edge[n] = true;
 						}
 					}
 					if(row.size() == 8) break;
 				}
-				if(row.size() < 8){
-					for(int n = 0; n < 8 - row.size(); n++){
-						ap_uint<64> a = 0;
-						a(63,62) = (ap_uint<2>)(2);
-						shift_edge_list.push_back(a);
-					}
+				for(int n = 0; n < 8; n++){
+					dep_graph_ch[i % NUM_CH].push_back(packet[n]);
 				}
-				push_edge_count += row.size();
+				edge_count++;
+				pushed_edge_count += row.size();
 			}
 
-			for(int j = 0; j < shift_edge_list.size(); j ++){
-				dep_graph_ch[i%NUM_CH].push_back(shift_edge_list[j]);
-			}
-			node_count += nodes.size() / 8;
-			edge_count += shift_edge_list.size() / 8;
+			// for(int j = 0; j < shift_edge_list.size(); j ++){
+			// 	dep_graph_ch[i%NUM_CH].push_back(shift_edge_list[j]);
+			// }
+			// node_count += nodes.size() / 8;
+			// edge_count += shift_edge_list.size() / 8;
 			// std::clog << "node: " << node_count << std::endl;
 			// std::clog << "edge: " << edge_count << std::endl;
 			inst.push_back(node_count);
