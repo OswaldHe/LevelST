@@ -18,7 +18,7 @@ using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
-constexpr int NUM_CH = 7;
+constexpr int NUM_CH = 8;
 constexpr int WINDOW_SIZE = 1024;
 
 template <typename T>
@@ -29,7 +29,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
 			// tapa::mmaps<int, NUM_CH> dep_graph_ptr,
 			tapa::mmaps<int, NUM_CH> merge_inst_ptr,
-			tapa::mmaps<float_v16, NUM_CH> f, 
+			tapa::mmap<float_v16> f, 
 			tapa::mmap<float_v16> x, 
 			int N
 			// tapa::mmap<int> K_csc
@@ -449,6 +449,7 @@ int main(int argc, char* argv[]){
 		int rem = 16 - (N % 16);
 		for(int i = 0; i < rem; i++) {
 			f_fpga[index].push_back(0.0);
+			f.push_back(0.0);
 		}
 	}
 
@@ -568,7 +569,7 @@ int main(int argc, char* argv[]){
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(merge_inst_ptr),
-						tapa::read_only_mmaps<float, NUM_CH>(f_fpga).reinterpret<float_v16>(),
+						tapa::read_only_mmap<float>(f).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(), N
 						// tapa::read_only_mmap<int>(K_csc)
 						);

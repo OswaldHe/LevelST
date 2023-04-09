@@ -5,7 +5,7 @@
 
 constexpr int WINDOW_SIZE = 1024;
 constexpr int WINDOW_SIZE_div_16 = 64;
-constexpr int NUM_CH = 7;
+constexpr int NUM_CH = 8;
 
 using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
@@ -123,6 +123,24 @@ void read_float_vec(int pe_i, int total_N, tapa::async_mmap<float_v16>& mmap, ta
 				}
 		}
 		offset+=num_ite;
+	}
+}
+
+void read_f(int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float_v16, NUM_CH>& f_fifo_out){
+	const int num_ite = (N + 15) / 16;
+	for(int i_req = 0, i_resp = 0, c_idx = 0; i_resp < num_ite;){
+		if(i_req < num_ite && !mmap.read_addr.full()){
+				mmap.read_addr.try_write(i_req);
+				++i_req;
+		}
+		if(!mmap.read_data.empty()){
+				float_v16 tmp;
+				mmap.read_data.try_read(tmp);
+				f_fifo_out[c_idx].write(tmp);
+				++i_resp;
+				if(i_resp % WINDOW_SIZE_div_16 == 0) c_idx++;
+				if(c_idx == NUM_CH) c_idx = 0;
+		}
 	}
 }
 
@@ -525,66 +543,6 @@ void split_ptr_inst(int pe_i, int total_N,
 		}
 	}
 
-// void read_dep_graph_ptr(int pe_i, int total_N,
-// 	tapa::async_mmap<int>& dep_graph_ptr,
-// 	tapa::ostream<int>& dep_graph_ptr_q){
-// 		int N = 0;
-// 		for (int i_req = 0, i_resp = 0; i_resp < 1;) {
-// 			if(i_req < 1 && !dep_graph_ptr.read_addr.full()){
-// 					dep_graph_ptr.read_addr.try_write(i_req);
-// 					++i_req;
-// 			}
-// 			if(!dep_graph_ptr.read_data.empty()){
-// 				int tmp;
-// 				dep_graph_ptr.read_data.try_read(tmp);
-// 				N = tmp;
-// 				++i_resp;
-// 			}
-// 		}
-// 		for (int i_req = 0, i_resp = 0; i_resp < N;) {
-// 			if(i_req < N && !dep_graph_ptr.read_addr.full()){
-// 					dep_graph_ptr.read_addr.try_write(i_req+1);
-// 					++i_req;
-// 			}
-// 			if(!dep_graph_ptr.read_data.empty()){
-// 				int tmp;
-// 				dep_graph_ptr.read_data.try_read(tmp);
-// 				dep_graph_ptr_q.write(tmp);
-// 				++i_resp;
-// 			}
-// 		}
-// 	}
-
-// void read_A_ptr(int pe_i, int total_N,
-// 	tapa::async_mmap<int>& csr_edge_list_ptr,
-// 	tapa::ostream<int>& csr_edge_list_ptr_q){
-// 		int N = 0;
-// 		for (int i_req = 0, i_resp = 0; i_resp < 1;) {
-// 			if(i_req < 1 && !csr_edge_list_ptr.read_addr.full()){
-// 					csr_edge_list_ptr.read_addr.try_write(i_req);
-// 					++i_req;
-// 			}
-// 			if(!csr_edge_list_ptr.read_data.empty()){
-// 				int tmp;
-// 				csr_edge_list_ptr.read_data.try_read(tmp);
-// 				N = tmp;
-// 				++i_resp;
-// 			}
-// 		}
-// 		for (int i_req = 0, i_resp = 0; i_resp < N;) {
-// 			if(i_req < N && !csr_edge_list_ptr.read_addr.full()){
-// 					csr_edge_list_ptr.read_addr.try_write(i_req+1);
-// 					++i_req;
-// 			}
-// 			if(!csr_edge_list_ptr.read_data.empty()){
-// 				int tmp;
-// 				csr_edge_list_ptr.read_data.try_read(tmp);
-// 				csr_edge_list_ptr_q.write(tmp);
-// 				++i_resp;
-// 			}
-// 		}
-// 	}
-
 void read_all_ptr(
 	tapa::async_mmap<int>& merge_inst_ptr,
 	tapa::ostream<int>& merge_inst_q){
@@ -768,7 +726,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
 			// tapa::mmaps<int, NUM_CH> dep_graph_ptr,
 			tapa::mmaps<int, NUM_CH> merge_inst_ptr,
-			tapa::mmaps<float_v16, NUM_CH> f, 
+			tapa::mmap<float_v16> f, 
 			tapa::mmap<float_v16> x, 
 			int N // # of dimension
 			){
@@ -791,7 +749,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<int, NUM_CH> N_sub_1("n_sub_1");
 	tapa::streams<int, NUM_CH> N_sub_2("n_sub_2");
 	tapa::streams<int, NUM_CH> N_sub_3("n_sub_3");
-	tapa::streams<int, NUM_CH> N_sub_4("n_sub_4");
+	// tapa::streams<int, NUM_CH> N_sub_4("n_sub_4");
 	tapa::streams<float_v16, NUM_CH> y("y");
 	tapa::streams<float_v16, NUM_CH> y_update("y_update");
 	tapa::streams<float_v16, NUM_CH> x_next("x_next");
@@ -803,7 +761,8 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join>(read_len, N, N_val)
 		.invoke<tapa::join>(fill_zero, x_q)
 		.invoke<tapa::detach>(request_X, x, block_id, req_x, fin_write)
-		.invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
+		.invoke<tapa::join>(read_f, N, f, f_q)
+		// .invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
 		.invoke<tapa::join, NUM_CH>(read_all_ptr, merge_inst_ptr, merge_inst_q)
 		.invoke<tapa::join, NUM_CH>(split_ptr_inst, tapa::seq(), N, merge_inst_q, dep_graph_ptr_q, csr_edge_list_ptr_q)
 		// .invoke<tapa::join, NUM_CH>(read_A_ptr, tapa::seq(), N, csr_edge_list_ptr, csr_edge_list_ptr_q)
@@ -812,9 +771,9 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join, NUM_CH>(read_dep_graph, tapa::seq(), N, dep_graph_ch, dep_graph_ptr_q, dep_graph_ch_q, dep_graph_inst)
 		.invoke<tapa::join, NUM_CH>(X_bypass, tapa::seq(), N, x_q, x_apt, x_bypass)
 		.invoke<tapa::join, NUM_CH>(PEG_Xvec, tapa::seq(), N, spmv_inst, spmv_inst_2, spmv_val, fifo_aXVec, block_id, req_x)
-		.invoke<tapa::join, NUM_CH>(PEG_YVec, tapa::seq(), N, spmv_inst_2, fifo_aXVec, y, N_sub_1, N_sub_2)
-		.invoke<tapa::detach, NUM_CH>(Yvec_minus_f, f_q, y, y_update, N_sub_2, N_sub_3)
-		.invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, y_update, x_next, N_sub_3, N_sub_4)
-		.invoke<tapa::join, NUM_CH>(X_Merger, tapa::seq(), N, x_apt, x_next, x_bypass, x_q, N_sub_4)
+		.invoke<tapa::join, NUM_CH>(PEG_YVec, tapa::seq(), N, spmv_inst_2, fifo_aXVec, y, N_val, N_sub_1)
+		.invoke<tapa::detach, NUM_CH>(Yvec_minus_f, f_q, y, y_update, N_sub_1, N_sub_2)
+		.invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, y_update, x_next, N_sub_2, N_sub_3)
+		.invoke<tapa::join, NUM_CH>(X_Merger, tapa::seq(), N, x_apt, x_next, x_bypass, x_q, N_sub_3)
 		.invoke<tapa::join>(write_x, x_q, fin_write, x, N);
 }
