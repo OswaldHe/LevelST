@@ -160,11 +160,14 @@ void generate_edgelist_spmv(
 		}
 		
 		// std::clog << "pe: " << i << std::endl;
+		// int count_non_zero = 0;
 		for(int j = 0; j < i; j++){
 			// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
 			int list_size = tmp_edge_list[j].size();
 			int total_size = 0;
 			vector<bool> used_edge(list_size, false);
+			std::set<int> row_raw;
+			int pack_chunk_count = 0;
 			for(int k = 0; k < list_size;){
 				std::set<int> row;
 				int pack_count = 0;
@@ -176,9 +179,10 @@ void generate_edgelist_spmv(
 				}
 				for(int l = 0; l < list_size; l++){
 					int row_i = (tmp_edge_list[j][l](63, 52) | (int) 0);
-					if(!used_edge[l] && row.find(row_i%8) == row.end()){
+					if(!used_edge[l] && row.find(row_i%8) == row.end() && row_raw.find(row_i) == row_raw.end()){
 						packet[row_i%8] = tmp_edge_list[j][l];
 						row.insert(row_i%8);
+						row_raw.insert(row_i);
 						used_edge[l] = true;
 						pack_count++;
 						if(pack_count == 8) break;
@@ -189,9 +193,16 @@ void generate_edgelist_spmv(
 				for(int l = 0; l < 8; l++){
 					edge_list_ch[i%NUM_CH].push_back(packet[l]);
 				}
+				pack_chunk_count++;
+				if(pack_chunk_count == 10) {
+					pack_chunk_count = 0;
+					row_raw.clear();
+				}
 			}
+			// if(total_size != 0) count_non_zero++;
 			edge_list_ptr[i%NUM_CH].push_back(total_size);
 		}
+		// std::clog << count_non_zero << std::endl;
 	}
 	// for(int i = 0; i < NUM_CH; i++){
 	// 	int size = edge_list_ptr[i].size();
@@ -320,6 +331,8 @@ void generate_dependency_graph_for_pes(
 			int rem_edge_num = edge_list.size();
 			int pushed_edge_count = 0;
 			vector<bool> used_edge(rem_edge_num, false);
+			int pack_chunk_count = 0;
+			std::set<int> row_raw;
 			while(pushed_edge_count < rem_edge_num){
 				std::set<int> row;
 				// std::set<int> col;
@@ -335,9 +348,11 @@ void generate_dependency_graph_for_pes(
 						int row_i = (e(61,47) | (int) 0);
 						// int col_i = (e(46,32) | (int) 0);
 						if(row.find(row_i%8) == row.end() 
+						&& row_raw.find(row_i) == row_raw.end()
 						// && col.find(col_i) == col.end()
 						){
 							row.insert(row_i%8);
+							row_raw.insert(row_i);
 							packet[row_i % 8] = e;
 							// col.insert(col_i);
 							// shift_edge_list.push_back(edge_list[n]);
@@ -348,6 +363,11 @@ void generate_dependency_graph_for_pes(
 				}
 				for(int n = 0; n < 8; n++){
 					dep_graph_ch[i % NUM_CH].push_back(packet[n]);
+				}
+				pack_chunk_count++;
+				if(pack_chunk_count == 6){
+					pack_chunk_count = 0;
+					row_raw.clear();
 				}
 				edge_count++;
 				pushed_edge_count += row.size();

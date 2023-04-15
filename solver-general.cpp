@@ -249,7 +249,7 @@ load_axv:
 
 acc:
 				for(int i = 0; i < num_ite;){
-					#pragma HLS dependence variable=local_c type=intra false
+					#pragma HLS dependence true variable=local_c distance=10
 
 					if(!fifo_aXVec.empty()){
 						MultXVec ravx; fifo_aXVec.try_read(ravx);
@@ -343,10 +343,11 @@ for(;;){
 	const int N_layer = dep_graph_ptr.read();
 	const int num_ite = (N + 15) / 16;
 
-	float local_x[8][WINDOW_SIZE];
+	float local_x[8][8][WINDOW_SIZE];
 	float local_y[8][WINDOW_SIZE];
 
 #pragma HLS array_partition complete variable=local_x dim=1
+#pragma HLS array_partition complete variable=local_x dim=2
 #pragma HLS array_partition complete variable=local_y dim=1
 
 read_y:
@@ -385,7 +386,7 @@ compute_node:
 					if((opcode | (int) 0) == 1){
 						float ans = local_y[k][row] * val_f;
 						for(int l = 0; l < 8; l++){
-							local_x[l][row] = ans;
+							local_x[l][k][row] = ans;
 						}
 					}
 				}
@@ -396,8 +397,7 @@ compute_node:
 compute_edge:
 		for(int j = 0; j < N_edge;){
 			#pragma HLS pipeline II=1
-			#pragma HLS dependence variable=local_x type=intra false
-			#pragma HLS dependence variable=local_y type=intra false
+			#pragma HLS dependence true variable=local_y distance=6
 			if(!dep_graph_ch.empty()){
 				ap_uint<512> dep_block; dep_graph_ch.try_read(dep_block);
 
@@ -410,7 +410,7 @@ compute_edge:
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 0){
-						local_y[k][row] -= (local_x[k][col] * val_f);
+						local_y[k][row] -= (local_x[k][col%8][col] * val_f);
 					}
 				}
 				j++;
@@ -426,7 +426,7 @@ write_x:
 		float_v16 tmp_x;
 		for(int j = 0; j < 16; j++){
 		#pragma HLS unroll
-			tmp_x[j] = local_x[j/2][(i << 4)+j];
+			tmp_x[j] = local_x[j/2][j%8][(i << 4)+j];
 		}
 		x_out.write(tmp_x);
 	}
