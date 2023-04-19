@@ -4,7 +4,9 @@
 //#include <glog/logging.h>
 
 constexpr int WINDOW_SIZE = 1024;
+constexpr int WINDOW_SIZE_div_2 = 512;
 constexpr int WINDOW_SIZE_div_16 = 64;
+constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 8;
 
 using float_v16 = tapa::vec_t<float, 16>;
@@ -158,19 +160,19 @@ round:
 		for(int round = 0; round < bound; round++){
 #pragma HLS loop_flatten off
 
-			float local_x[4][WINDOW_SIZE];
+			float local_x[4][WINDOW_SIZE_div_2];
 #pragma HLS array_partition variable=local_x complete dim=1
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 
 load_x:
-			for(int ite = 0; ite < pe_i+round*NUM_CH; ite++){
+			for(int ite = 0; ite < (pe_i+round*NUM_CH)*2; ite++){
 				const int N = fifo_inst_in.read();
 				fifo_inst_out.write(N);
 				const int num_ite = (N + 7) / 8;
 				//read x
 				if(N != 0){
 					block_id.write(ite);
-					for(int i = 0; i < WINDOW_SIZE_div_16;){
+					for(int i = 0; i < WINDOW_SIZE_div_32;){
 						#pragma HLS pipeline II=1
 						if(!req_x.empty()){
 							float_v16 x_val; req_x.try_read(x_val);
@@ -243,7 +245,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < pe_i+round*NUM_CH; ite++){
+			for(int ite = 0; ite < (pe_i+round*NUM_CH)*2; ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -673,7 +675,7 @@ handle_request:
 		if(!fin_write.empty()){
 			bool last = fin_write.read(nullptr);
 			if(last){
-				block_done++;
+				block_done+=2;
 			}else{
 				block_done = 0;
 			}
@@ -686,11 +688,11 @@ scan:
 				else {
 					block_id[i].read(nullptr);
 	load_x_to_cache:
-						for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
+						for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE_div_32;){
 	#pragma HLS pipeline II=1
-	#pragma HLS loop_tripcount min=0 max=1024
-							if(i_req < WINDOW_SIZE/16 && !mmap.read_addr.full()){
-								mmap.read_addr.try_write(i_req+block*WINDOW_SIZE_div_16);
+	#pragma HLS loop_tripcount min=0 max=32
+							if(i_req < WINDOW_SIZE_div_32 && !mmap.read_addr.full()){
+								mmap.read_addr.try_write(i_req+block*WINDOW_SIZE_div_32);
 								++i_req;
 							}
 							if(!mmap.read_data.empty() && !fifo_x_out[i].full()){

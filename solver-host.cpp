@@ -20,6 +20,7 @@ using std::vector;
 
 constexpr int NUM_CH = 8;
 constexpr int WINDOW_SIZE = 1024;
+constexpr int WINDOW_SIZE_div_2 = 512;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -146,22 +147,22 @@ void generate_edgelist_spmv(
 ){
 	int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 	for(int i = 0; i < bound; i++){
-		vector<aligned_vector<ap_uint<64>>> tmp_edge_list(i+1);
+		vector<aligned_vector<ap_uint<64>>> tmp_edge_list(i*2+2);
 		for(int j = i*WINDOW_SIZE; j < (i+1)*WINDOW_SIZE && j < N; j++){
 			int start = (j == 0)? 0 : csr_row_ptr[j-1];
 			int end = csr_row_ptr[j];
 			for(int k = start; k < end; k++){
 				ap_uint<64> a = 0;
 				a(63, 52) = (ap_uint<12>)((j - i*WINDOW_SIZE) & 0xFFF);
-				a(51, 32) = (ap_uint<20>)((csr_col_ind[k]%WINDOW_SIZE) & 0xFFFFF);
+				a(51, 32) = (ap_uint<20>)((csr_col_ind[k]%(WINDOW_SIZE_div_2)) & 0xFFFFF);
 				a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
-				tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE].push_back(a);
+				tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE_div_2].push_back(a);
 			}
 		}
 		
 		// std::clog << "pe: " << i << std::endl;
 		// int count_non_zero = 0;
-		for(int j = 0; j < i; j++){
+		for(int j = 0; j < i*2; j++){
 			// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
 			int list_size = tmp_edge_list[j].size();
 			int total_size = 0;
@@ -408,13 +409,13 @@ void merge_ptr(int N,
 		int edge_list_offset = 0;
 		int dep_graph_offset = 0;
 		for(int round = 0; round < bound; round++){
-			merge_inst_ptr[pe_i].push_back(pe_i+NUM_CH*round);
+			merge_inst_ptr[pe_i].push_back((pe_i+NUM_CH*round)*2);
 			int N_level = dep_graph_ptr[pe_i][dep_graph_offset++];
 			merge_inst_ptr[pe_i].push_back(N_level);
-			for(int i = 0; i < pe_i+NUM_CH*round; i++){
+			for(int i = 0; i < (pe_i+NUM_CH*round)*2; i++){
 				merge_inst_ptr[pe_i].push_back(edge_list_ptr[pe_i][i+edge_list_offset]);
 			}
-			edge_list_offset+=pe_i+NUM_CH*round;
+			edge_list_offset+=(pe_i+NUM_CH*round)*2;
 			for(int i = 0; i < N_level*2; i++){
 				merge_inst_ptr[pe_i].push_back(dep_graph_ptr[pe_i][i+dep_graph_offset]);
 			}
