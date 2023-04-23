@@ -3,9 +3,10 @@
 #include <tapa.h>
 //#include <glog/logging.h>
 
-constexpr int WINDOW_SIZE = 1024;
+constexpr int WINDOW_SIZE = 2048;
+constexpr int WINDOW_SIZE_div_8 = 256;
 constexpr int WINDOW_SIZE_div_2 = 512;
-constexpr int WINDOW_SIZE_div_16 = 64;
+constexpr int WINDOW_SIZE_div_16 = 128;
 constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 8;
 
@@ -165,7 +166,7 @@ round:
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 
 load_x:
-			for(int ite = 0; ite < (pe_i+round*NUM_CH)*2; ite++){
+			for(int ite = 0; ite < (pe_i+round*NUM_CH)*4; ite++){
 				const int N = fifo_inst_in.read();
 				fifo_inst_out.write(N);
 				const int num_ite = (N + 7) / 8;
@@ -245,7 +246,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < (pe_i+round*NUM_CH)*2; ite++){
+			for(int ite = 0; ite < (pe_i+round*NUM_CH)*4; ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -345,7 +346,7 @@ for(;;){
 	const int N_layer = dep_graph_ptr.read();
 	const int num_ite = (N + 15) / 16;
 
-	float local_x[8][8][WINDOW_SIZE];
+	float local_x[8][8][WINDOW_SIZE_div_8];
 	float local_y[8][WINDOW_SIZE];
 
 #pragma HLS array_partition complete variable=local_x dim=1
@@ -388,7 +389,7 @@ compute_node:
 					if((opcode | (int) 0) == 1){
 						float ans = local_y[k][row] * val_f;
 						for(int l = 0; l < 8; l++){
-							local_x[l][k][row] = ans;
+							local_x[l][k][(row >> 3)] = ans;
 						}
 					}
 				}
@@ -412,7 +413,7 @@ compute_edge:
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 0){
-						local_y[k][row] -= (local_x[k][col%8][col] * val_f);
+						local_y[k][row] -= (local_x[k][col%8][(col >> 3)] * val_f);
 					}
 				}
 				j++;
@@ -428,7 +429,7 @@ write_x:
 		float_v16 tmp_x;
 		for(int j = 0; j < 16; j++){
 		#pragma HLS unroll
-			tmp_x[j] = local_x[j/2][j%8][(i << 4)+j];
+			tmp_x[j] = local_x[j/2][j%8][(i << 1)+(j >> 3)];
 		}
 		x_out.write(tmp_x);
 	}
@@ -675,7 +676,7 @@ handle_request:
 		if(!fin_write.empty()){
 			bool last = fin_write.read(nullptr);
 			if(last){
-				block_done+=2;
+				block_done+=4;
 			}else{
 				block_done = 0;
 			}
