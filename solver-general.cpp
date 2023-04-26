@@ -3,10 +3,10 @@
 #include <tapa.h>
 //#include <glog/logging.h>
 
-constexpr int WINDOW_SIZE = 2048;
-constexpr int WINDOW_SIZE_div_8 = 256;
+constexpr int WINDOW_SIZE = 4096;
+constexpr int WINDOW_SIZE_div_8 = 512;
 constexpr int WINDOW_SIZE_div_2 = 512;
-constexpr int WINDOW_SIZE_div_16 = 128;
+constexpr int WINDOW_SIZE_div_16 = 256;
 constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 8;
 
@@ -16,7 +16,7 @@ using float_v8 = tapa::vec_t<float, 8>;
 using float_v2 = tapa::vec_t<float, 2>;
 
 struct MultXVec {
-	tapa::vec_t<ap_uint<12>, 8> row;
+	tapa::vec_t<ap_uint<16>, 8> row;
 	float_v8 axv;
 };
 
@@ -166,7 +166,7 @@ round:
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 
 load_x:
-			for(int ite = 0; ite < (pe_i+round*NUM_CH)*4; ite++){
+			for(int ite = 0; ite < (pe_i+round*NUM_CH)*8; ite++){
 				const int N = fifo_inst_in.read();
 				fifo_inst_out.write(N);
 				const int num_ite = (N + 7) / 8;
@@ -199,12 +199,12 @@ compute:
 
 						for(int k = 0; k < 8; k++){
 							ap_uint<64> a = spmv_block(64*k+63, 64*k);
-							ap_uint<12> a_row = a(63, 52);
-							ap_uint<20> a_col = a(51, 32);
+							ap_uint<16> a_row = a(63, 48);
+							ap_uint<16> a_col = a(47, 32);
 							ap_uint<32> a_val = a(31, 0);
 
 							raxv.row[k] = a_row;
-							if(a_row[11] == 0){
+							if(a_row[15] == 0){
 								float a_val_f = tapa::bit_cast<float>(a_val);
 								raxv.axv[k] = local_x[k%4][a_col] * a_val_f;
 							}
@@ -236,7 +236,6 @@ round:
 			float local_c[8][WINDOW_SIZE];
 #pragma HLS bind_storage variable=local_c type=RAM_2P impl=URAM
 #pragma HLS array_partition variable=local_c complete dim=1
-#pragma HLS array_partition variable=local_c cyclic factor=2 dim=2
 
 reset:
 			for(int i = 0; i < num_x; i++){
@@ -246,7 +245,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < (pe_i+round*NUM_CH)*4; ite++){
+			for(int ite = 0; ite < (pe_i+round*NUM_CH)*8; ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -259,7 +258,7 @@ acc:
 						for(int k = 0; k < 8; k++){
 							#pragma HLS unroll
 							auto a_row = ravx.row[k];
-							if(a_row[11] == 0){
+							if(a_row[15] == 0){
 								local_c[k][a_row] += ravx.axv[k];
 							}
 						}
@@ -347,7 +346,7 @@ for(;;){
 	const int num_ite = (N + 15) / 16;
 
 	float local_x[8][8][WINDOW_SIZE_div_8];
-	float local_y[8][WINDOW_SIZE];
+	float local_y[8][WINDOW_SIZE_div_8];
 
 #pragma HLS array_partition complete variable=local_x dim=1
 #pragma HLS array_partition complete variable=local_x dim=2
@@ -360,7 +359,7 @@ read_y:
 			float_v16 tmp_f; y_in.try_read(tmp_f);
 			for(int j = 0; j < 16; j++){
 				#pragma HLS unroll
-				local_y[j%8][(i << 4) + j] = tmp_f[j];
+				local_y[j%8][(i << 1) + (j >> 3)] = tmp_f[j];
 			}
 			i++;
 		}
@@ -387,7 +386,7 @@ compute_node:
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 1){
-						float ans = local_y[k][row] * val_f;
+						float ans = local_y[k][(row >> 3)] * val_f;
 						for(int l = 0; l < 8; l++){
 							local_x[l][k][(row >> 3)] = ans;
 						}
@@ -413,7 +412,7 @@ compute_edge:
 					ap_uint<32> val = a(31,0);
 					float val_f = tapa::bit_cast<float>(val);
 					if((opcode | (int) 0) == 0){
-						local_y[k][row] -= (local_x[k][col%8][(col >> 3)] * val_f);
+						local_y[k][(row >> 3)] -= (local_x[k][col%8][(col >> 3)] * val_f);
 					}
 				}
 				j++;
@@ -676,7 +675,7 @@ handle_request:
 		if(!fin_write.empty()){
 			bool last = fin_write.read(nullptr);
 			if(last){
-				block_done+=4;
+				block_done+=8;
 			}else{
 				block_done = 0;
 			}

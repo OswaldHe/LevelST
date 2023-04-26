@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <set>
 #include <cmath>
 #include <cassert>
@@ -19,10 +20,10 @@ using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
 constexpr int NUM_CH = 8;
-constexpr int WINDOW_SIZE = 2048;
+constexpr int WINDOW_SIZE = 4096;
 constexpr int WINDOW_SIZE_div_2 = 512;
 int WINDOW_SIZE_SPMV = 32;
-int MULT_SIZE = 4;
+int MULT_SIZE = 8;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -155,8 +156,8 @@ void generate_edgelist_spmv(
 			int end = csr_row_ptr[j];
 			for(int k = start; k < end; k++){
 				ap_uint<64> a = 0;
-				a(63, 52) = (ap_uint<12>)((j - i*WINDOW_SIZE) & 0xFFF);
-				a(51, 32) = (ap_uint<20>)((csr_col_ind[k]%(WINDOW_SIZE_div_2)) & 0xFFFFF);
+				a(63, 48) = (ap_uint<16>)((j - i*WINDOW_SIZE) & 0xFFFF);
+				a(47, 32) = (ap_uint<16>)((csr_col_ind[k]%(WINDOW_SIZE_div_2)) & 0xFFFF);
 				a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
 				tmp_edge_list[csr_col_ind[k]/WINDOW_SIZE_div_2].push_back(a);
 			}
@@ -164,6 +165,7 @@ void generate_edgelist_spmv(
 		
 		// std::clog << "pe: " << i << std::endl;
 		// int count_non_zero = 0;
+		// int total_cycle = 0;
 		for(int j = 0; j < i*MULT_SIZE; j++){
 			// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
 			int list_size = tmp_edge_list[j].size();
@@ -177,11 +179,11 @@ void generate_edgelist_spmv(
 				vector<ap_uint<64>> packet(8);
 				for(int l = 0; l < 8; l++){
 					ap_uint<64> a = 0;
-					a(63, 52) = (ap_uint<12>) 0xFFF;
+					a(63, 48) = (ap_uint<16>) 0xFFFF;
 					packet[l] = a;
 				}
 				for(int l = 0; l < list_size; l++){
-					int row_i = (tmp_edge_list[j][l](63, 52) | (int) 0);
+					int row_i = (tmp_edge_list[j][l](63, 48) | (int) 0);
 					if(!used_edge[l] && row.find(row_i%8) == row.end() && row_raw.find(row_i) == row_raw.end()){
 						packet[row_i%8] = tmp_edge_list[j][l];
 						row.insert(row_i%8);
@@ -202,10 +204,13 @@ void generate_edgelist_spmv(
 					row_raw.clear();
 				}
 			}
-			// if(total_size != 0) count_non_zero++;
+			// if(total_size != 0) {
+			// 	count_non_zero++;
+			// 	total_cycle+=(11+total_size/8);
+			// }
 			edge_list_ptr[i%NUM_CH].push_back(total_size);
 		}
-		// std::clog << count_non_zero << std::endl;
+		// std::clog << std::max(count_non_zero*WINDOW_SIZE_SPMV, total_cycle) << std::endl;
 	}
 	// for(int i = 0; i < NUM_CH; i++){
 	// 	int size = edge_list_ptr[i].size();
@@ -637,7 +642,7 @@ int main(int argc, char* argv[]){
 	int unmatched = 0;
 
         for (int i = 0; i < N; ++i){
-		if(std::fabs(x_fpga[i]-expected_x[i]) > 1.0e-5 * K){
+		if(std::fabs(x_fpga[i]-expected_x[i]) > 1.0e-6 * K){
 			std::clog << "index: " << i << ", expected: " << expected_x[i] << ", actual: " << x_fpga[i] << std::endl;
 			unmatched++;
 		}
