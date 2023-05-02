@@ -20,10 +20,11 @@ using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
 constexpr int NUM_CH = 8;
-constexpr int WINDOW_SIZE = 4096;
+constexpr int WINDOW_SIZE = 2048;
 constexpr int WINDOW_SIZE_div_2 = 512;
+constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE*NUM_CH;
 int WINDOW_SIZE_SPMV = 32;
-int MULT_SIZE = 8;
+int MULT_SIZE = 4;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -166,7 +167,7 @@ void generate_edgelist_spmv(
 		// std::clog << "pe: " << i << std::endl;
 		// int count_non_zero = 0;
 		// int total_cycle = 0;
-		for(int j = 0; j < i*MULT_SIZE; j++){
+		for(int j = 0; j < (i/8)*8*MULT_SIZE; j++){
 			// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
 			int list_size = tmp_edge_list[j].size();
 			int total_size = 0;
@@ -216,6 +217,14 @@ void generate_edgelist_spmv(
 	// 	int size = edge_list_ptr[i].size();
 	// 	edge_list_ptr[i].insert(edge_list_ptr[i].begin(), size);
 	// }
+
+	if(bound % NUM_CH != 0){
+		for(int i = bound % NUM_CH; i < NUM_CH; i++){
+			for(int j = 0; j < ((bound - 1)/8)*8*MULT_SIZE; j++){
+				edge_list_ptr[i].push_back(0);
+			}
+		}
+	}
 }
 
 void generate_dependency_graph_for_pes(
@@ -226,7 +235,7 @@ void generate_dependency_graph_for_pes(
 	vector<aligned_vector<ap_uint<64>>>& dep_graph_ch,
 	vector<aligned_vector<int>>& dep_graph_ptr
 ){
-	int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	int bound = (N % WINDOW_LARGE_SIZE == 0) ? N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
 	for(int i = 0; i < bound; i++){
 		// std::clog << "level: " << i << std::endl;
 		vector<int> csrRowPtr;
@@ -234,11 +243,11 @@ void generate_dependency_graph_for_pes(
 
 		//extract csr
 		int row_ptr = 0;
-		for(int j = 0; j < WINDOW_SIZE && j < N - i * WINDOW_SIZE; j++){
-			int start = (i*WINDOW_SIZE+j == 0) ? 0:csr_row_ptr[i*WINDOW_SIZE+j-1];
-			for(int k = start; k < csr_row_ptr[i*WINDOW_SIZE+j]; k++){
-				if(csr_col_ind[k] >= i * WINDOW_SIZE){
-					int c = csr_col_ind[k] - i * WINDOW_SIZE;
+		for(int j = 0; j < WINDOW_LARGE_SIZE && j < N - i * WINDOW_LARGE_SIZE; j++){
+			int start = (i*WINDOW_LARGE_SIZE+j == 0) ? 0:csr_row_ptr[i*WINDOW_LARGE_SIZE+j-1];
+			for(int k = start; k < csr_row_ptr[i*WINDOW_LARGE_SIZE+j]; k++){
+				if(csr_col_ind[k] >= i * WINDOW_LARGE_SIZE){
+					int c = csr_col_ind[k] - i * WINDOW_LARGE_SIZE;
 					float v = csr_val[k];
 					edge<float> e(c, j, v);
 					if(dep_map.find(c) == dep_map.end()){
@@ -256,7 +265,7 @@ void generate_dependency_graph_for_pes(
 		vector<int> parents;
 		std::queue<int> roots;
 		int prev = 0;
-		for(int j = 0; j < WINDOW_SIZE && j < N - i * WINDOW_SIZE; j++){
+		for(int j = 0; j < WINDOW_LARGE_SIZE && j < N - i * WINDOW_LARGE_SIZE; j++){
 			parents.push_back(csrRowPtr[j]-prev-1);
 			if(csrRowPtr[j]-prev-1 == 0) {
 				roots.push(j);
@@ -264,27 +273,31 @@ void generate_dependency_graph_for_pes(
 			prev = csrRowPtr[j];
 		}
 
-		vector<int> inst;
+		vector<vector<int>> inst(NUM_CH);
+		int layer_count = 0;
 		
 		while(!roots.empty()){
-			int node_count = 0;
-			int edge_count = 0;
 			int size = roots.size();
-			vector<ap_uint<64>> nodes;
-			vector<ap_uint<64>> edge_list;
+
+			//TODO: split node/edge list into 8 PEs
+			aligned_vector<vector<ap_uint<64>>> nodes_pe(NUM_CH);
+			aligned_vector<vector<ap_uint<64>>> edges_pe(NUM_CH*NUM_CH);
+			vector<int> node_count_pe(NUM_CH);
+			aligned_vector<vector<int>> edge_count_pe(NUM_CH);
+
 			for(int j = 0; j < size; j++){
 				int root = roots.front();
 				for(auto e : dep_map[root]){
 					ap_uint<64> a;
-					a(61,47) = (ap_uint<15>)(e.row & 0x7FFF);
-					a(46,32) = (ap_uint<15>)(e.col & 0x7FFF);
+					a(61,47) = (ap_uint<15>)((e.row%WINDOW_SIZE) & 0x7FFF);
+					a(46,32) = (ap_uint<15>)((e.col%WINDOW_SIZE) & 0x7FFF);
 					a(31,0) = tapa::bit_cast<ap_uint<32>>(e.attr);
 					if(e.row == e.col){
 						a(63,62) = (ap_uint<2>)(1);
-						nodes.push_back(a);
+						nodes_pe[e.row/WINDOW_SIZE].push_back(a);
 					}else{
 						a(63,62) = (ap_uint<2>)(0);
-						edge_list.push_back(a);
+						edges_pe[(e.row/WINDOW_SIZE)*NUM_CH+(e.col/WINDOW_SIZE)].push_back(a);
 						parents[e.row]--;
 						if(parents[e.row] == 0) {
 							roots.push(e.row);
@@ -293,6 +306,10 @@ void generate_dependency_graph_for_pes(
 				}
 				roots.pop();
 			}
+
+			//TODO: split edge into blocks
+			
+
 			// for(int j = 0; j < nodes.size(); j ++){
 			// 	dep_graph_ch[i%NUM_CH].push_back(nodes[j]);
 			// }
@@ -305,6 +322,12 @@ void generate_dependency_graph_for_pes(
 			// 	}
 			// 	node_count++;
 			// }
+
+			//schedule each PEs
+			for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+				int node_count = 0;
+				vector<ap_uint<64>> nodes = nodes_pe[pe_i];
+
 			int rem_node_num = nodes.size();
 			int pushed_node_count = 0;
 			vector<bool> used_node(rem_node_num, false);
@@ -314,6 +337,7 @@ void generate_dependency_graph_for_pes(
 				for(int n = 0; n < 8; n++){
 					ap_uint<64> a = 0;
 					a(63,62) = (ap_uint<2>)(2);
+					a(61,47) = 0x7FFF;
 					a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
 					packet[n] = a;
 				}
@@ -331,56 +355,64 @@ void generate_dependency_graph_for_pes(
 					if(row.size() == 8) break;
 				}
 				for(int n = 0; n < 8; n++){
-					dep_graph_ch[i % NUM_CH].push_back(packet[n]);
+					dep_graph_ch[pe_i].push_back(packet[n]);
 				}
 				node_count++;
 			}
+			node_count_pe[pe_i] = node_count;
 			
-			int rem_edge_num = edge_list.size();
-			int pushed_edge_count = 0;
-			vector<bool> used_edge(rem_edge_num, false);
-			int pack_chunk_count = 0;
-			std::set<int> row_raw;
-			while(pushed_edge_count < rem_edge_num){
-				std::set<int> row;
-				// std::set<int> col;
-				vector<ap_uint<64>> packet(8);
-				for(int n = 0; n < 8; n++){
-					ap_uint<64> a = 0;
-					a(63,62) = (ap_uint<2>)(2);
-					packet[n] = a;
-				}
-				for(int n = 0; n < rem_edge_num; n++){
-					if(!used_edge[n]){
-						auto e = edge_list[n];
-						int row_i = (e(61,47) | (int) 0);
-						// int col_i = (e(46,32) | (int) 0);
-						if(row.find(row_i%8) == row.end() 
-						&& row_raw.find(row_i) == row_raw.end()
-						// && col.find(col_i) == col.end()
-						){
-							row.insert(row_i%8);
-							row_raw.insert(row_i);
-							packet[row_i % 8] = e;
-							// col.insert(col_i);
-							// shift_edge_list.push_back(edge_list[n]);
-							used_edge[n] = true;
-						}
-					}
-					if(row.size() == 8) break;
-				}
-				for(int n = 0; n < 8; n++){
-					dep_graph_ch[i % NUM_CH].push_back(packet[n]);
-				}
-				pack_chunk_count++;
-				if(pack_chunk_count == 6){
-					pack_chunk_count = 0;
-					row_raw.clear();
-				}
-				edge_count++;
-				pushed_edge_count += row.size();
-			}
+			for(int block_id = pe_i; block_id >= 0; block_id--){
+				int edge_count = 0;
+				vector<ap_uint<64>> edge_list = edges_pe[pe_i*NUM_CH+block_id];
 
+				int rem_edge_num = edge_list.size();
+				int pushed_edge_count = 0;
+				vector<bool> used_edge(rem_edge_num, false);
+				int pack_chunk_count = 0;
+				std::set<int> row_raw;
+				while(pushed_edge_count < rem_edge_num){
+					std::set<int> row;
+					// std::set<int> col;
+					vector<ap_uint<64>> packet(8);
+					for(int n = 0; n < 8; n++){
+						ap_uint<64> a = 0;
+						a(63,62) = (ap_uint<2>)(2);
+						a(61,47) = 0x7FFF;
+						packet[n] = a;
+					}
+					for(int n = 0; n < rem_edge_num; n++){
+						if(!used_edge[n]){
+							auto e = edge_list[n];
+							int row_i = (e(61,47) | (int) 0);
+							// int col_i = (e(46,32) | (int) 0);
+							if(row.find(row_i%8) == row.end() 
+							&& row_raw.find(row_i) == row_raw.end()
+							// && col.find(col_i) == col.end()
+							){
+								row.insert(row_i%8);
+								row_raw.insert(row_i);
+								packet[row_i % 8] = e;
+								// col.insert(col_i);
+								// shift_edge_list.push_back(edge_list[n]);
+								used_edge[n] = true;
+							}
+						}
+						if(row.size() == 8) break;
+					}
+					for(int n = 0; n < 8; n++){
+						dep_graph_ch[pe_i].push_back(packet[n]);
+					}
+					pack_chunk_count++;
+					if(pack_chunk_count == 6){
+						pack_chunk_count = 0;
+						row_raw.clear();
+					}
+					edge_count++;
+					pushed_edge_count += row.size();
+				}
+				edge_count_pe[pe_i].push_back(edge_count);
+
+			}
 			// for(int j = 0; j < shift_edge_list.size(); j ++){
 			// 	dep_graph_ch[i%NUM_CH].push_back(shift_edge_list[j]);
 			// }
@@ -388,13 +420,40 @@ void generate_dependency_graph_for_pes(
 			// edge_count += shift_edge_list.size() / 8;
 			// std::clog << "node: " << node_count << std::endl;
 			// std::clog << "edge: " << edge_count << std::endl;
-			inst.push_back(node_count);
-			inst.push_back(edge_count);
+			// inst.push_back(node_count);
+			// inst.push_back(edge_count);
+
+			}
+			//process dep graph ptr
+			for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+				// std::clog << "pe: " << pe_i << std::endl;
+				int sum_edge = 0;
+				for(int num : edge_count_pe[pe_i]){
+					sum_edge+=num;
+				}
+				inst[pe_i].push_back(node_count_pe[pe_i]);
+				inst[pe_i].push_back(sum_edge);
+				for(int b = pe_i; b >= 0; b--){
+					inst[pe_i].push_back(node_count_pe[b]);
+					inst[pe_i].push_back(edge_count_pe[pe_i][pe_i-b]);
+					// std::clog << "node: " << node_count_pe[b] << std::endl;
+					// std::clog << "edge: " << edge_count_pe[pe_i][pe_i-b] << std::endl;
+				}
+			}
+			layer_count++;
+
 		}
-		assert(inst.size() % 2 == 0);
-		dep_graph_ptr[i%NUM_CH].push_back(inst.size()/2);
-		for(auto num : inst){
-			dep_graph_ptr[i%NUM_CH].push_back(num);
+		// assert(inst.size() % 2 == 0);
+		// dep_graph_ptr[i%NUM_CH].push_back(inst.size()/2);
+		// for(auto num : inst){
+		// 	dep_graph_ptr[i%NUM_CH].push_back(num);
+		// }
+
+		for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+			dep_graph_ptr[pe_i].push_back(layer_count);
+			for(auto num : inst[pe_i]){
+				dep_graph_ptr[pe_i].push_back(num);
+			}
 		}
 
 	}
@@ -410,23 +469,22 @@ void merge_ptr(int N,
 	vector<aligned_vector<int>>& edge_list_ptr,
 	vector<aligned_vector<int>>& merge_inst_ptr){
 	
-	int level = (N%WINDOW_SIZE == 0)?N/WINDOW_SIZE:N/WINDOW_SIZE+1;
+	int bound = (N%WINDOW_LARGE_SIZE == 0)?N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
 	for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
-		int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
 		int edge_list_offset = 0;
 		int dep_graph_offset = 0;
 		for(int round = 0; round < bound; round++){
-			merge_inst_ptr[pe_i].push_back((pe_i+NUM_CH*round)*MULT_SIZE);
+			merge_inst_ptr[pe_i].push_back((NUM_CH*round)*MULT_SIZE);
 			int N_level = dep_graph_ptr[pe_i][dep_graph_offset++];
 			merge_inst_ptr[pe_i].push_back(N_level);
-			for(int i = 0; i < (pe_i+NUM_CH*round)*MULT_SIZE; i++){
+			for(int i = 0; i < (NUM_CH*round)*MULT_SIZE; i++){
 				merge_inst_ptr[pe_i].push_back(edge_list_ptr[pe_i][i+edge_list_offset]);
 			}
-			edge_list_offset+=(pe_i+NUM_CH*round)*MULT_SIZE;
-			for(int i = 0; i < N_level*2; i++){
+			edge_list_offset+=(NUM_CH*round)*MULT_SIZE;
+			for(int i = 0; i < N_level*(2+2*(pe_i+1)); i++){
 				merge_inst_ptr[pe_i].push_back(dep_graph_ptr[pe_i][i+dep_graph_offset]);
 			}
-			dep_graph_offset+= N_level*2;
+			dep_graph_offset+= N_level*(2+2*(pe_i+1));
 		}
 		int size = merge_inst_ptr[pe_i].size();
 		merge_inst_ptr[pe_i].insert(merge_inst_ptr[pe_i].begin(), size);
