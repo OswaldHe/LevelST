@@ -36,6 +36,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmaps<int, NUM_CH> merge_inst_ptr,
 			tapa::mmap<float_v16> f, 
 			tapa::mmap<float_v16> x, 
+			tapa::mmap<int> if_need,
 			int N
 			// tapa::mmap<int> K_csc
 			);
@@ -147,7 +148,8 @@ void generate_edgelist_spmv(
 	const aligned_vector<int>& csr_col_ind,
 	const aligned_vector<float>& csr_val,
 	vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
-	vector<aligned_vector<int>>& edge_list_ptr
+	vector<aligned_vector<int>>& edge_list_ptr,
+	aligned_vector<int>& if_need
 ){
 	int bound = (N % WINDOW_SIZE == 0) ? N/WINDOW_SIZE:N/WINDOW_SIZE+1;
 	for(int i = 0; i < bound; i++){
@@ -225,6 +227,17 @@ void generate_edgelist_spmv(
 			}
 		}
 	}
+
+	for(int i = 0; i < edge_list_ptr[0].size(); i++){
+		bool is_non_zero = false;
+		for(int j = 0; j < NUM_CH; j++){
+			if(edge_list_ptr[j][i] != 0) is_non_zero = true;
+		}
+		if(is_non_zero) if_need.push_back(1);
+		else if_need.push_back(0);
+	}
+	int size = if_need.size();
+	if_need.insert(if_need.begin(), size);
 }
 
 void generate_dependency_graph_for_pes(
@@ -621,11 +634,19 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<ap_uint<64>>> dep_graph_ch(NUM_CH);
 	vector<aligned_vector<int>> dep_graph_ptr(NUM_CH);
 	vector<aligned_vector<int>> merge_inst_ptr(NUM_CH);
+	aligned_vector<int> if_need;
 
 	convertCSRToCSC(N, nnz, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
-	generate_edgelist_spmv(N, IA, JA, A, edge_list_ch, edge_list_ptr);
+	generate_edgelist_spmv(N, IA, JA, A, edge_list_ch, edge_list_ptr, if_need);
 	generate_dependency_graph_for_pes(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
 	merge_ptr(N, dep_graph_ptr, edge_list_ptr, merge_inst_ptr);
+
+	int need_count = 0;
+	for(int i = 1; i < if_need.size(); i++){
+		if(if_need[i] == 1) need_count++;
+	}
+
+	std::clog << "need to read hbm: " << need_count << " times" << std::endl;
 
 	// std::clog << K_csc[156] << std::endl;
 	// std::clog << edge_list_ptr[1].size() << std::endl;
@@ -691,7 +712,8 @@ int main(int argc, char* argv[]){
 						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
 						tapa::read_only_mmaps<int, NUM_CH>(merge_inst_ptr),
 						tapa::read_only_mmap<float>(f).reinterpret<float_v16>(),
-                        tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(), N
+                        tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(),
+						tapa::read_only_mmap<int>(if_need), N
 						// tapa::read_only_mmap<int>(K_csc)
 						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
