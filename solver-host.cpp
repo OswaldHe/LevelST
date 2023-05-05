@@ -20,11 +20,11 @@ using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
 constexpr int NUM_CH = 8;
-constexpr int WINDOW_SIZE = 2048;
+constexpr int WINDOW_SIZE = 4096;
 constexpr int WINDOW_SIZE_div_2 = 512;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE*NUM_CH;
 int WINDOW_SIZE_SPMV = 32;
-int MULT_SIZE = 4;
+int MULT_SIZE = 8;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;

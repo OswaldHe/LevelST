@@ -3,10 +3,10 @@
 #include <tapa.h>
 //#include <glog/logging.h>
 
-constexpr int WINDOW_SIZE = 2048;
-constexpr int WINDOW_SIZE_div_8 = 256;
+constexpr int WINDOW_SIZE = 4096;
+constexpr int WINDOW_SIZE_div_8 = 512;
 constexpr int WINDOW_SIZE_div_2 = 512;
-constexpr int WINDOW_SIZE_div_16 = 128;
+constexpr int WINDOW_SIZE_div_16 = 256;
 constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 8;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE * NUM_CH;
@@ -81,11 +81,11 @@ void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istr
 }
 
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, int total_N){
-	int num_block = total_N / WINDOW_SIZE;
+	int num_block = total_N / WINDOW_SIZE_div_2;
 	for(int i = 0; i < num_block; i++){
 	    // LOG(INFO) << "process level " << i << " ...";
-		int start = WINDOW_SIZE_div_16*i;
-		int N = WINDOW_SIZE_div_16;
+		int start = WINDOW_SIZE_div_32*i;
+		int N = WINDOW_SIZE_div_32;
 		for(int i_req = 0, i_resp = 0; i_resp < N;){
 			if(i_req < N && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
 				mmap.write_addr.try_write(i_req + start);
@@ -101,10 +101,10 @@ void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::
 	}
 
 	//residue
-	int residue = ((total_N % WINDOW_SIZE) + 15)/16;
+	int residue = ((total_N % WINDOW_SIZE_div_2) + 15)/16;
 	for(int i_req = 0, i_resp = 0; i_resp < residue;){
 		if(i_req < residue && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
-			mmap.write_addr.try_write(i_req + num_block * WINDOW_SIZE_div_16);
+			mmap.write_addr.try_write(i_req + num_block * WINDOW_SIZE_div_32);
 			mmap.write_data.try_write(x.read(nullptr));
 			++i_req;
 		}
@@ -183,7 +183,7 @@ round:
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 
 load_x:
-			for(int ite = 0; ite < (round*NUM_CH)*4; ite++){
+			for(int ite = 0; ite < (round*NUM_CH)*8; ite++){
 				const int N = fifo_inst_in.read();
 				const int need = fifo_need_in.read();
 				fifo_inst_out.write(N);
@@ -254,6 +254,7 @@ round:
 			N_out.write(num_x);
 
 			float local_c[8][WINDOW_SIZE_div_8];
+#pragma HLS bind_storage variable=local_c type=RAM_2P impl=URAM
 #pragma HLS array_partition variable=local_c complete dim=1
 
 reset:
@@ -264,7 +265,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < (round*NUM_CH)*4; ite++){
+			for(int ite = 0; ite < (round*NUM_CH)*8; ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -953,7 +954,7 @@ void read_x(int total_N,
 	int bound = (total_N%WINDOW_LARGE_SIZE == 0)?total_N/WINDOW_LARGE_SIZE:total_N/WINDOW_LARGE_SIZE+1;
 
 	for(int round = 0; round < bound; round++){
-		for(int ite = 0; ite < (round*NUM_CH)*4; ite++){
+		for(int ite = 0; ite < (round*NUM_CH)*8; ite++){
 			int need = fifo_inst_in.read();
 			fifo_inst_out.write(need);
 
@@ -983,7 +984,7 @@ handle_request:
 		if(!fin_write.empty()){
 			bool last = fin_write.read(nullptr);
 			if(last){
-				block_done+=4;
+				block_done += 1;
 			}else{
 				block_done = 0;
 			}
