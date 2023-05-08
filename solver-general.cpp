@@ -1,12 +1,13 @@
 #include <ap_int.h>
 #include <cstdint>
 #include <tapa.h>
+#include <iomanip>
 //#include <glog/logging.h>
 
-constexpr int WINDOW_SIZE = 4096;
-constexpr int WINDOW_SIZE_div_8 = 512;
+constexpr int WINDOW_SIZE = 8192;
+constexpr int WINDOW_SIZE_div_8 = 1024;
 constexpr int WINDOW_SIZE_div_2 = 512;
-constexpr int WINDOW_SIZE_div_16 = 256;
+constexpr int WINDOW_SIZE_div_16 = 512;
 constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 8;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE * NUM_CH;
@@ -183,7 +184,7 @@ round:
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 
 load_x:
-			for(int ite = 0; ite < (round*NUM_CH)*8; ite++){
+			for(int ite = 0; ite < (round*NUM_CH)*16; ite++){
 				const int N = fifo_inst_in.read();
 				const int need = fifo_need_in.read();
 				fifo_inst_out.write(N);
@@ -227,6 +228,7 @@ compute:
 							if(a_row[15] == 0){
 								float a_val_f = tapa::bit_cast<float>(a_val);
 								raxv.axv[k] = local_x[k%4][a_col] * a_val_f;
+								// if(a_row == 2102) LOG(INFO) << std::fixed << std::setprecision(6) << "col: " << a_col << ", t1: " << local_x[k%4][a_col] << ", t2: " << a_val_f; 
 							}
 						}
 						fifo_aXVec.write(raxv);
@@ -265,7 +267,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < (round*NUM_CH)*8; ite++){
+			for(int ite = 0; ite < (round*NUM_CH)*16; ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -327,6 +329,7 @@ read_f:
 					for(int j = 0; j < 16; j++){
 						#pragma HLS unroll
 						local_y[(i << 4)+j] = tmp_f[j];
+						// if((i << 4) + j == 2102) LOG(INFO) << tmp_f[j];
 					}
 					i++;
 				}
@@ -410,6 +413,7 @@ compute_node:
 					if((opcode | (int) 0) == 1){
 						float ans = local_y[k][(row >> 3)] * val_f;
 						dvec.axv[k] = ans;
+						// if(row == 2102) LOG(INFO) << "row: " << row << ", t1: " << local_y[k][(row >> 3)] << ", t2: " << val_f; 
 					}
 				}
 				fifo_node_to_edge.write(dvec);
@@ -548,6 +552,7 @@ compute:
 						if((opcode | (int) 0) == 0){
 							float val_f = tapa::bit_cast<float>(val);
 							dvec.axv[k] = (local_x_tmp[k][col%8][(col >> 3)] * val_f);
+							// if(row == 2102) LOG(INFO) << "row: " << row << ", t1: " << local_x_tmp[k][col%8][(col >> 3)] << ", t2: " << val_f; 
 						}
 					}
 					fifo_edge_to_node.write(dvec);
@@ -954,7 +959,7 @@ void read_x(int total_N,
 	int bound = (total_N%WINDOW_LARGE_SIZE == 0)?total_N/WINDOW_LARGE_SIZE:total_N/WINDOW_LARGE_SIZE+1;
 
 	for(int round = 0; round < bound; round++){
-		for(int ite = 0; ite < (round*NUM_CH)*8; ite++){
+		for(int ite = 0; ite < (round*NUM_CH)*16; ite++){
 			int need = fifo_inst_in.read();
 			fifo_inst_out.write(need);
 

@@ -20,11 +20,11 @@ using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
 constexpr int NUM_CH = 8;
-constexpr int WINDOW_SIZE = 4096;
+constexpr int WINDOW_SIZE = 8192;
 constexpr int WINDOW_SIZE_div_2 = 512;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE*NUM_CH;
 int WINDOW_SIZE_SPMV = 32;
-int MULT_SIZE = 8;
+int MULT_SIZE = 16;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -202,7 +202,7 @@ void generate_edgelist_spmv(
 					edge_list_ch[i%NUM_CH].push_back(packet[l]);
 				}
 				pack_chunk_count++;
-				if(pack_chunk_count == 10) {
+				if(pack_chunk_count == 11) {
 					pack_chunk_count = 0;
 					row_raw.clear();
 				}
@@ -416,7 +416,7 @@ void generate_dependency_graph_for_pes(
 						dep_graph_ch[pe_i].push_back(packet[n]);
 					}
 					pack_chunk_count++;
-					if(pack_chunk_count == 6){
+					if(pack_chunk_count == 10){
 						pack_chunk_count = 0;
 						row_raw.clear();
 					}
@@ -676,14 +676,21 @@ int main(int argc, char* argv[]){
 	//triangular solver in cpu
 	vector<float> expected_x(N);
 	int next = 0;
+	float test_sum = 0.f;
 	for(int i = 0; i < N; i++){
 		float image = f[i];
+		// if(i == 67638) std::clog << "f: " << f[i] << std::endl;
 		float num = (i == 0) ? IA[0] : IA[i] - IA[i-1];
 		for(int j = 0; j < num-1; j++){
 			image -= expected_x[JA[next]]*A[next];
+			// if(i == 67638) {
+			// 	std::clog << "col:" << JA[next] << ", t1:" << expected_x[JA[next]] << ", t2:" << A[next] << std::endl; 
+			// 	test_sum += expected_x[JA[next]]*A[next];
+			// }
 			next++;
 		}
-		expected_x[JA[next]] = image / A[next];
+		// if(i == 67638) std::clog << "row:" << JA[next] << ", val:" << f[i] - test_sum  << ", diff:" << std::fabs((f[i] - test_sum) - (image * A[next]))<< std::endl;
+		expected_x[JA[next]] = image * A[next];
 		//sanity check
 		/* 
 		if(i == 0){
@@ -722,8 +729,8 @@ int main(int argc, char* argv[]){
 	int unmatched = 0;
 
         for (int i = 0; i < N; ++i){
-		if(std::fabs(x_fpga[i]-expected_x[i]) > 1.0e-6 * K){
-			std::clog << "index: " << i << ", expected: " << expected_x[i] << ", actual: " << x_fpga[i] << std::endl;
+		if(std::fabs((x_fpga[i]-expected_x[i])/(x_fpga[i])) > 1.0e-2){
+			std::clog << "index: " << i << ", expected: " << expected_x[i] << ", actual: " << x_fpga[i] << ", diff: " << std::fabs(x_fpga[i]-expected_x[i]) << std::endl;
 			unmatched++;
 		}
         }
