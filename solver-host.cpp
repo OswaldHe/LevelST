@@ -528,7 +528,7 @@ void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, align
 int main(int argc, char* argv[]){
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-	// const int N = argc > 1 ? atoll(argv[1]) : 8192;
+	const int D = argc > 1 ? atoll(argv[1]) : 60000;
 	// const int remainder = N % WINDOW_SIZE;
 	// int K = N*2-N/WINDOW_SIZE;
 	// if(remainder != 0) K --;
@@ -552,6 +552,8 @@ int main(int argc, char* argv[]){
 	aligned_vector<float> f;
 	// aligned_vector<float> x(N);
 	aligned_vector<int> cycle(1, 0); 
+
+	if(argc > 1) M = D;
 
 	extract_lower_triangular_matrix(M, K, nnz, CSRRowPtr, CSRColIndex, CSRVal, IA, JA, A);
 
