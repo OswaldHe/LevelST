@@ -9,7 +9,8 @@ constexpr int WINDOW_SIZE_div_8 = 1024;
 constexpr int WINDOW_SIZE_div_2 = 512;
 constexpr int WINDOW_SIZE_div_16 = 512;
 constexpr int WINDOW_SIZE_div_32 = 32;
-constexpr int NUM_CH = 8;
+constexpr int NUM_CH = 10;
+constexpr int MULT_SIZE = 16;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE * NUM_CH;
 
 using float_v16 = tapa::vec_t<float, 16>;
@@ -179,12 +180,14 @@ round:
 		for(int round = 0; round < bound; round++){
 #pragma HLS loop_flatten off
 
-			float local_x[4][WINDOW_SIZE_div_2];
+load_x:
+			for(int ite = 0; ite < (round*NUM_CH)*MULT_SIZE; ite++){
+
+				float local_x[4][WINDOW_SIZE_div_2];
+#pragma HLS bind_storage variable=local_x latency=2
 #pragma HLS array_partition variable=local_x complete dim=1
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
 
-load_x:
-			for(int ite = 0; ite < (round*NUM_CH)*16; ite++){
 				const int N = fifo_inst_in.read();
 				const int need = fifo_need_in.read();
 				fifo_inst_out.write(N);
@@ -227,7 +230,7 @@ compute:
 							raxv.row[k] = a_row;
 							if(a_row[15] == 0){
 								float a_val_f = tapa::bit_cast<float>(a_val);
-								raxv.axv[k] = local_x[k%4][a_col] * a_val_f;
+								raxv.axv[k] = local_x[k/2][a_col] * a_val_f;
 								// if(a_row == 2102) LOG(INFO) << std::fixed << std::setprecision(6) << "col: " << a_col << ", t1: " << local_x[k%4][a_col] << ", t2: " << a_val_f; 
 							}
 						}
@@ -267,7 +270,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < (round*NUM_CH)*16; ite++){
+			for(int ite = 0; ite < (round*NUM_CH)*MULT_SIZE; ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -472,12 +475,15 @@ for(;;){
 	const int num_ite = (N + 15) / 16;
 
 	float local_x[8][WINDOW_SIZE_div_8];
-	float local_x_tmp[8][8][WINDOW_SIZE_div_8];
 
 #pragma HLS bind_storage variable=local_x type=RAM_2P impl=URAM
 #pragma HLS array_partition complete variable=local_x dim=1
+
+	float local_x_tmp[4][8][WINDOW_SIZE_div_8];
+#pragma HLS bind_storage variable=local_x_tmp latency=2
 #pragma HLS array_partition complete variable=local_x_tmp dim=1
 #pragma HLS array_partition complete variable=local_x_tmp dim=2
+// #pragma HLS array_partition cyclic variable=local_x_tmp factor=2 dim=3	
 
 compute:
     for(int i = 0; i < N_layer; i++){
@@ -501,7 +507,7 @@ compute:
 							auto row = node_block.row[k];
 							auto val = node_block.axv[k];
 							if(row[14] == 0){
-								for(int l = 0; l < 8; l++){
+								for(int l = 0; l < 4; l++){
 									local_x_tmp[l][k][(row >> 3)] = val;
 								}
 								local_x[k][row>>3] = val;
@@ -523,7 +529,7 @@ compute:
 							auto row = node_block.row[k];
 							auto val = node_block.axv[k];
 							if(row[14] == 0){
-								for(int l = 0; l < 8; l++){
+								for(int l = 0; l < 4; l++){
 									local_x_tmp[l][k][(row >> 3)] = val;
 								}
 							}
@@ -551,7 +557,7 @@ compute:
 						dvec.row[k] = row;
 						if((opcode | (int) 0) == 0){
 							float val_f = tapa::bit_cast<float>(val);
-							dvec.axv[k] = (local_x_tmp[k][col%8][(col >> 3)] * val_f);
+							dvec.axv[k] = (local_x_tmp[k/2][col%8][(col >> 3)] * val_f);
 							// if(row == 2102) LOG(INFO) << "row: " << row << ", t1: " << local_x_tmp[k][col%8][(col >> 3)] << ", t2: " << val_f; 
 						}
 					}
@@ -686,6 +692,7 @@ write_x:
 void read_A_and_split(int pe_i, int total_N,
 	tapa::async_mmap<ap_uint<512>>& csr_edge_list_ch,
 	tapa::istream<int>& csr_edge_list_ptr,
+	tapa::ostream<int>& csr_edge_list_out,
 	tapa::ostream<ap_uint<512>>& spmv_val,
 	tapa::ostream<int>& spmv_inst){
 		int offset = 0;
@@ -695,12 +702,14 @@ round:
 		for(int round = 0;round < bound;round++){
 #pragma HLS loop_flatten off
 			const int block_N = csr_edge_list_ptr.read();
+			csr_edge_list_out.write(block_N);
 
 traverse_block:
 			for(int i = 0; i < block_N; i++){
 				#pragma HLS pipeline II=1
 				const int N = csr_edge_list_ptr.read();
 				const int num_ite = (N + 7) / 8;
+				csr_edge_list_out.write(N);
 				spmv_inst.write(N);
 split:
 				for (int i_req = 0, i_resp = 0; i_resp < num_ite;) {
@@ -723,6 +732,7 @@ split:
 void read_dep_graph(int pe_i, int total_N,
 	tapa::async_mmap<ap_uint<512>>& dep_graph_ch,
 	tapa::istream<int>& dep_graph_ptr,
+	tapa::ostream<int>& dep_graph_ptr_out,
 	tapa::ostream<ap_uint<512>>& dep_graph_node,
 	tapa::ostream<ap_uint<512>>& dep_graph_edge,
 	tapa::ostream<int>& dep_graph_inst_node,
@@ -734,6 +744,7 @@ round:
 		for(int round = 0;round < bound;round++){
 #pragma HLS loop_flatten off
 			const int N_layer = dep_graph_ptr.read();
+			dep_graph_ptr_out.write(N_layer);
 			dep_graph_inst_node.write(N_layer);
 			dep_graph_inst_edge.write(N_layer);
 
@@ -742,13 +753,15 @@ layer:
 				#pragma HLS pipeline II=1 style=frp
 				const int N_node = dep_graph_ptr.read();
 				const int N_edge = dep_graph_ptr.read();
-				int N_node_sub = dep_graph_ptr.read();
-				int N_edge_sub = dep_graph_ptr.read();
+				const int N_edge_total = N_edge * (pe_i + 1);
+
+				dep_graph_ptr_out.write(N_node);
+				dep_graph_ptr_out.write(N_edge);
 
 				dep_graph_inst_node.write(N_node);
-				dep_graph_inst_node.write(N_edge);
-				dep_graph_inst_edge.write(N_node_sub);
-				dep_graph_inst_edge.write(N_edge_sub);
+				dep_graph_inst_node.write(N_edge_total);
+				dep_graph_inst_edge.write(N_node);
+				dep_graph_inst_edge.write(N_edge);
 				
 split:
 				for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
@@ -765,8 +778,8 @@ split:
 				}
 				offset+=N_node;
 
-				for (int i_req = 0, i_resp = 0; i_resp < N_edge_sub;) {
-					if(i_req < N_edge_sub && !dep_graph_ch.read_addr.full()){
+				for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
+					if(i_req < N_edge && !dep_graph_ch.read_addr.full()){
 						dep_graph_ch.read_addr.try_write(i_req+offset);
 						++i_req;
 					}
@@ -777,16 +790,14 @@ split:
 						++i_resp;
 					}
 				}
-				offset+=N_edge_sub;
+				offset+=N_edge;
 
 				for(int edge_sec = 0; edge_sec < pe_i; edge_sec++){
-					N_node_sub = dep_graph_ptr.read();
-					N_edge_sub = dep_graph_ptr.read();
 
-					dep_graph_inst_edge.write(N_node_sub);
-					dep_graph_inst_edge.write(N_edge_sub);
-					for (int i_req = 0, i_resp = 0; i_resp < N_edge_sub;) {
-						if(i_req < N_edge_sub && !dep_graph_ch.read_addr.full()){
+					dep_graph_inst_edge.write(N_node);
+					dep_graph_inst_edge.write(N_edge);
+					for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
+						if(i_req < N_edge && !dep_graph_ch.read_addr.full()){
 								dep_graph_ch.read_addr.try_write(i_req+offset);
 								++i_req;
 						}
@@ -797,13 +808,13 @@ split:
 							++i_resp;
 						}
 					}
-					offset+=N_edge_sub;
+					offset+=N_edge;
 				}
 			}
 		}
 	}
 
-void split_ptr_inst(int pe_i, int total_N,
+void split_ptr_inst(int total_N,
 	tapa::istream<int>& merge_inst_q,
 	tapa::ostream<int>& dep_graph_ptr_q,
 	tapa::ostream<int>& csr_edge_list_ptr_q){
@@ -816,7 +827,7 @@ void split_ptr_inst(int pe_i, int total_N,
 			csr_edge_list_ptr_q.write(spmv_N);
 			dep_graph_ptr_q.write(dep_graph_N);
 
-			const int dep_graph_ite = dep_graph_N * (2+2*(pe_i+1));
+			const int dep_graph_ite = dep_graph_N * 2;
 
 			for(int i = 0; i < spmv_N;){
 				if(!merge_inst_q.empty()){
@@ -868,14 +879,14 @@ void read_all_ptr(
 void X_Merger(int pe_i, int N, tapa::istream<float_v16>& x_first, tapa::istream<float_v16>& x_second, tapa::istream<float_v16>& x_bypass, tapa::ostream<float_v16>& x_out, tapa::istream<int>& N_in){
 	int level = N % (WINDOW_LARGE_SIZE) == 0 ? N / WINDOW_LARGE_SIZE : N/WINDOW_LARGE_SIZE + 1;
 	int last = (N % WINDOW_LARGE_SIZE)%WINDOW_SIZE == 0 ? (N % WINDOW_LARGE_SIZE)/WINDOW_SIZE - 1:(N % WINDOW_LARGE_SIZE)/WINDOW_SIZE;
+	const int num_ite_x = ((N % (WINDOW_SIZE * NUM_CH)) + 15)/16;
 	for(int round = 0; round < level;round++){
 #pragma HLS loop_flatten off
 		const int num_x = N_in.read();
 
 		if(round == level-1 && pe_i > last && last != -1){
-			const int num_ite = ((N % (WINDOW_SIZE * NUM_CH)) + 15)/16;
 bypass:
-			for(int i = 0; i < num_ite; i++){
+			for(int i = 0; i < num_ite_x; i++){
 				#pragma HLS loop_tripcount min=1 max=385
 				x_out.write(x_bypass.read());
 			}
@@ -900,6 +911,7 @@ second:
 void X_bypass(int pe_i, int N, tapa::istream<float_v16>& fifo_x_in, tapa::ostream<float_v16>& fifo_x_out, tapa::ostream<float_v16>& fifo_x_bypass){
 	int level = N % (WINDOW_LARGE_SIZE) == 0 ? N / WINDOW_LARGE_SIZE : N/WINDOW_LARGE_SIZE + 1;
 	int last = (N % WINDOW_LARGE_SIZE)%WINDOW_SIZE == 0 ? (N % WINDOW_LARGE_SIZE)/WINDOW_SIZE - 1:(N % WINDOW_LARGE_SIZE)/WINDOW_SIZE;
+	const int num_ite = ((N % (WINDOW_SIZE * NUM_CH)) + 15)/16;
 	if(pe_i == 0){
 		fifo_x_in.read();
 	}else {
@@ -913,7 +925,6 @@ round:
 					fifo_x_out.write(fifo_x_in.read());
 				}
 			}else{
-				const int num_ite = ((N % (WINDOW_SIZE * NUM_CH)) + 15)/16;
 		bypass:
 				for(int j = 0; j < num_ite; j++){
 					#pragma HLS loop_tripcount min=1 max=385
@@ -959,7 +970,7 @@ void read_x(int total_N,
 	int bound = (total_N%WINDOW_LARGE_SIZE == 0)?total_N/WINDOW_LARGE_SIZE:total_N/WINDOW_LARGE_SIZE+1;
 
 	for(int round = 0; round < bound; round++){
-		for(int ite = 0; ite < (round*NUM_CH)*16; ite++){
+		for(int ite = 0; ite < (round*NUM_CH)*MULT_SIZE; ite++){
 			int need = fifo_inst_in.read();
 			fifo_inst_out.write(need);
 
@@ -1024,7 +1035,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			// tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
 			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
 			// tapa::mmaps<int, NUM_CH> dep_graph_ptr,
-			tapa::mmaps<int, NUM_CH> merge_inst_ptr,
+			tapa::mmap<int> merge_inst_ptr, // TODO: only use one hbm port to afford more channels
 			tapa::mmap<float_v16> f, 
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
@@ -1037,16 +1048,16 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::stream<int> block_id("block_id");
 	tapa::streams<float_v16, NUM_CH+2> req_x("req_x");
 
-	tapa::streams<int, NUM_CH> merge_inst_q("merge_inst_q");
+	tapa::stream<int> merge_inst_q("merge_inst_q");
 	// tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_q("dep_graph_ch_q");
 	tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_node("dep_graph_ch_node");
 	tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_edge("dep_graph_ch_edge");
-	tapa::streams<int, NUM_CH> dep_graph_ptr_q("dep_graph_ptr_q");
+	tapa::streams<int, NUM_CH+1> dep_graph_ptr_q("dep_graph_ptr_q");
 	tapa::streams<int, NUM_CH> dep_graph_inst_edge("dep_graph_inst_edge");
 	tapa::streams<int, NUM_CH> dep_graph_inst("dep_graph_inst");
 	tapa::streams<float_v16, NUM_CH> f_q("f");
 	tapa::streams<ap_uint<512>, NUM_CH> spmv_val("spmv_val");
-	tapa::streams<int, NUM_CH> csr_edge_list_ptr_q("csr_edge_list_ptr_q");
+	tapa::streams<int, NUM_CH+1> csr_edge_list_ptr_q("csr_edge_list_ptr_q");
 	tapa::streams<int, NUM_CH> spmv_inst("spmv_inst");
 	tapa::streams<int, NUM_CH> spmv_inst_2("spmv_inst_2");
 	tapa::streams<int, NUM_CH> N_sub_1("n_sub_1");
@@ -1075,12 +1086,14 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join>(read_x, N, fifo_need, fifo_need, block_id, req_x, req_x)
 		.invoke<tapa::join>(read_f, N, f, f_q)
 		// .invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
-		.invoke<tapa::join, NUM_CH>(read_all_ptr, merge_inst_ptr, merge_inst_q)
-		.invoke<tapa::join, NUM_CH>(split_ptr_inst, tapa::seq(), N, merge_inst_q, dep_graph_ptr_q, csr_edge_list_ptr_q)
+		.invoke<tapa::join>(read_all_ptr, merge_inst_ptr, merge_inst_q)
+		.invoke<tapa::join>(split_ptr_inst, N, merge_inst_q, dep_graph_ptr_q, csr_edge_list_ptr_q)
 		// .invoke<tapa::join, NUM_CH>(read_A_ptr, tapa::seq(), N, csr_edge_list_ptr, csr_edge_list_ptr_q)
-		.invoke<tapa::join, NUM_CH>(read_A_and_split, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr_q, spmv_val, spmv_inst)
+		.invoke<tapa::join, NUM_CH>(read_A_and_split, tapa::seq(), N, csr_edge_list_ch, csr_edge_list_ptr_q, csr_edge_list_ptr_q, spmv_val, spmv_inst)
+		.invoke<tapa::detach>(black_hole_int, csr_edge_list_ptr_q)
 		// .invoke<tapa::join, NUM_CH>(read_dep_graph_ptr, tapa::seq(), N, dep_graph_ptr, dep_graph_ptr_q)
-		.invoke<tapa::join, NUM_CH>(read_dep_graph, tapa::seq(), N, dep_graph_ch, dep_graph_ptr_q, dep_graph_ch_node, dep_graph_ch_edge, dep_graph_inst, dep_graph_inst_edge)
+		.invoke<tapa::join, NUM_CH>(read_dep_graph, tapa::seq(), N, dep_graph_ch, dep_graph_ptr_q, dep_graph_ptr_q, dep_graph_ch_node, dep_graph_ch_edge, dep_graph_inst, dep_graph_inst_edge)
+		.invoke<tapa::detach>(black_hole_int, dep_graph_ptr_q)
 		.invoke<tapa::join, NUM_CH>(X_bypass, tapa::seq(), N, x_q, x_apt, x_bypass)
 		.invoke<tapa::join, NUM_CH>(PEG_Xvec, tapa::seq(), N, spmv_inst, spmv_inst_2, spmv_val, fifo_aXVec, fifo_need, fifo_need, req_x, req_x)
 		.invoke<tapa::detach>(black_hole_float_vec, req_x)
