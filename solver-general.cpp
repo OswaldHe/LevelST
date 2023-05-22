@@ -11,6 +11,7 @@ constexpr int WINDOW_SIZE_div_16 = 512;
 constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 10;
 constexpr int MULT_SIZE = 16;
+constexpr int FIFO_DEPTH = 2;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE * NUM_CH;
 
 using float_v16 = tapa::vec_t<float, 16>;
@@ -89,7 +90,7 @@ void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::
 		int start = WINDOW_SIZE_div_32*i;
 		int N = WINDOW_SIZE_div_32;
 		for(int i_req = 0, i_resp = 0; i_resp < N;){
-			if(i_req < N && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
+			if((i_req < N) & !x.empty() & !mmap.write_addr.full() & !mmap.write_data.full()){
 				mmap.write_addr.try_write(i_req + start);
 				mmap.write_data.try_write(x.read(nullptr));
 				++i_req;
@@ -148,7 +149,7 @@ void read_float_vec(int pe_i, int total_N, tapa::async_mmap<float_v16>& mmap, ta
 void read_f(int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float_v16, NUM_CH>& f_fifo_out){
 	const int num_ite = (N + 15) / 16;
 	for(int i_req = 0, i_resp = 0, c_idx = 0; i_resp < num_ite;){
-		if(i_req < num_ite && !mmap.read_addr.full()){
+		if((i_req < num_ite) & !mmap.read_addr.full()){
 				mmap.read_addr.try_write(i_req);
 				++i_req;
 		}
@@ -276,7 +277,8 @@ load_axv:
 
 acc:
 				for(int i = 0; i < num_ite;){
-					#pragma HLS dependence true variable=local_c distance=10
+					#pragma HLS pipeline II=1
+					#pragma HLS dependence variable=local_c distance=11 true
 
 					if(!fifo_aXVec.empty()){
 						MultXVec ravx; fifo_aXVec.try_read(ravx);
@@ -332,7 +334,6 @@ read_f:
 					for(int j = 0; j < 16; j++){
 						#pragma HLS unroll
 						local_y[(i << 4)+j] = tmp_f[j];
-						// if((i << 4) + j == 2102) LOG(INFO) << tmp_f[j];
 					}
 					i++;
 				}
@@ -416,7 +417,7 @@ compute_node:
 					if((opcode | (int) 0) == 1){
 						float ans = local_y[k][(row >> 3)] * val_f;
 						dvec.axv[k] = ans;
-						// if(row == 2102) LOG(INFO) << "row: " << row << ", t1: " << local_y[k][(row >> 3)] << ", t2: " << val_f; 
+						// if(pe_i == 0 && row == 3) LOG(INFO) << "row: " << row << ", t1: " << local_y[k][(row >> 3)] << ", t2: " << val_f; 
 					}
 				}
 				fifo_node_to_edge.write(dvec);
@@ -427,7 +428,7 @@ compute_node:
 load_edge:
 		for(int j = 0; j < N_edge;){
 			#pragma HLS pipeline II=1
-			#pragma HLS dependence true variable=local_y distance=6
+			#pragma HLS dependence variable=local_y distance=8 true
 			if(!fifo_edge_to_node.empty()){
 				MultDVec edge_block; fifo_edge_to_node.try_read(edge_block);
 
@@ -437,6 +438,7 @@ load_edge:
 					auto val = edge_block.axv[k];
 					if(row[14] == 0){
 						local_y[k][(row >> 3)] -= val;
+						// if(row == 3) LOG(INFO) << "after reduction: " << local_y[k][(row >> 3)];
 					}
 				}
 				j++;
@@ -542,7 +544,7 @@ compute:
 	compute_edge:
 			for(int j = 0; j < N_edge;){
 				#pragma HLS pipeline II=1
-				#pragma HLS dependence true variable=local_x_tmp distance=6
+
 				if(!dep_graph_ch.empty()){
 					ap_uint<512> dep_block; dep_graph_ch.try_read(dep_block);
 					MultDVec dvec;
@@ -558,7 +560,7 @@ compute:
 						if((opcode | (int) 0) == 0){
 							float val_f = tapa::bit_cast<float>(val);
 							dvec.axv[k] = (local_x_tmp[k/2][col%8][(col >> 3)] * val_f);
-							// if(row == 2102) LOG(INFO) << "row: " << row << ", t1: " << local_x_tmp[k][col%8][(col >> 3)] << ", t2: " << val_f; 
+							// if(pe_i == 0 && row == 3) LOG(INFO) << "row: " << row << ", col:" << col << ", t1: " << local_x_tmp[k/2][col%8][(col >> 3)] << ", t2: " << val_f; 
 						}
 					}
 					fifo_edge_to_node.write(dvec);
@@ -765,7 +767,7 @@ layer:
 				
 split:
 				for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
-					if(i_req < N_node && !dep_graph_ch.read_addr.full()){
+					if((i_req < N_node) & !dep_graph_ch.read_addr.full()){
 							dep_graph_ch.read_addr.try_write(i_req+offset);
 							++i_req;
 					}
@@ -779,7 +781,7 @@ split:
 				offset+=N_node;
 
 				for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
-					if(i_req < N_edge && !dep_graph_ch.read_addr.full()){
+					if((i_req < N_edge) & !dep_graph_ch.read_addr.full()){
 						dep_graph_ch.read_addr.try_write(i_req+offset);
 						++i_req;
 					}
@@ -797,7 +799,7 @@ split:
 					dep_graph_inst_edge.write(N_node);
 					dep_graph_inst_edge.write(N_edge);
 					for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
-						if(i_req < N_edge && !dep_graph_ch.read_addr.full()){
+						if((i_req < N_edge) & !dep_graph_ch.read_addr.full()){
 								dep_graph_ch.read_addr.try_write(i_req+offset);
 								++i_req;
 						}
@@ -851,7 +853,7 @@ void read_all_ptr(
 	tapa::ostream<int>& merge_inst_q){
 		int N = 0;
 		for (int i_req = 0, i_resp = 0; i_resp < 1;) {
-			if(i_req < 1 && !merge_inst_ptr.read_addr.full()){
+			if((i_req < 1) & !merge_inst_ptr.read_addr.full()){
 					merge_inst_ptr.read_addr.try_write(i_req);
 					++i_req;
 			}
@@ -863,7 +865,7 @@ void read_all_ptr(
 			}
 		}
 		for (int i_req = 0, i_resp = 0; i_resp < N;) {
-			if(i_req < N && !merge_inst_ptr.read_addr.full()){
+			if((i_req < N) & !merge_inst_ptr.read_addr.full()){
 					merge_inst_ptr.read_addr.try_write(i_req+1);
 					++i_req;
 			}
@@ -1042,40 +1044,40 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			int N // # of dimension
 			){
 
-	tapa::streams<int, NUM_CH> N_val("n_val");
-	tapa::streams<float_v16, NUM_CH+1> x_q("x_pipe");
-	tapa::stream<bool> fin_write("fin_write");
-	tapa::stream<int> block_id("block_id");
-	tapa::streams<float_v16, NUM_CH+2> req_x("req_x");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_val("n_val");
+	tapa::streams<float_v16, NUM_CH+1, FIFO_DEPTH> x_q("x_pipe");
+	tapa::stream<bool, FIFO_DEPTH> fin_write("fin_write");
+	tapa::stream<int, FIFO_DEPTH> block_id("block_id");
+	tapa::streams<float_v16, NUM_CH+2, FIFO_DEPTH> req_x("req_x");
 
-	tapa::stream<int> merge_inst_q("merge_inst_q");
+	tapa::stream<int, FIFO_DEPTH> merge_inst_q("merge_inst_q");
 	// tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_q("dep_graph_ch_q");
-	tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_node("dep_graph_ch_node");
-	tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_edge("dep_graph_ch_edge");
-	tapa::streams<int, NUM_CH+1> dep_graph_ptr_q("dep_graph_ptr_q");
-	tapa::streams<int, NUM_CH> dep_graph_inst_edge("dep_graph_inst_edge");
-	tapa::streams<int, NUM_CH> dep_graph_inst("dep_graph_inst");
-	tapa::streams<float_v16, NUM_CH> f_q("f");
-	tapa::streams<ap_uint<512>, NUM_CH> spmv_val("spmv_val");
-	tapa::streams<int, NUM_CH+1> csr_edge_list_ptr_q("csr_edge_list_ptr_q");
-	tapa::streams<int, NUM_CH> spmv_inst("spmv_inst");
-	tapa::streams<int, NUM_CH> spmv_inst_2("spmv_inst_2");
-	tapa::streams<int, NUM_CH> N_sub_1("n_sub_1");
-	tapa::streams<int, NUM_CH> N_sub_2("n_sub_2");
-	tapa::streams<int, NUM_CH> N_sub_3("n_sub_3");
-	tapa::streams<int, NUM_CH> N_sub_4("n_sub_4");
-	tapa::streams<float_v16, NUM_CH> y("y");
-	tapa::streams<float_v16, NUM_CH> y_update("y_update");
-	tapa::streams<float_v16, NUM_CH> x_next("x_next");
-	tapa::streams<float_v16, NUM_CH> x_apt("x_apt");
-	tapa::streams<float_v16, NUM_CH> x_bypass("x_bypass");
-	tapa::streams<MultXVec, NUM_CH> fifo_aXVec("fifo_aXVec");
+	tapa::streams<ap_uint<512>, NUM_CH, FIFO_DEPTH> dep_graph_ch_node("dep_graph_ch_node");
+	tapa::streams<ap_uint<512>, NUM_CH, FIFO_DEPTH> dep_graph_ch_edge("dep_graph_ch_edge");
+	tapa::streams<int, NUM_CH+1, FIFO_DEPTH> dep_graph_ptr_q("dep_graph_ptr_q");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> dep_graph_inst_edge("dep_graph_inst_edge");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> dep_graph_inst("dep_graph_inst");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> f_q("f");
+	tapa::streams<ap_uint<512>, NUM_CH, FIFO_DEPTH> spmv_val("spmv_val");
+	tapa::streams<int, NUM_CH+1, FIFO_DEPTH> csr_edge_list_ptr_q("csr_edge_list_ptr_q");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> spmv_inst("spmv_inst");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> spmv_inst_2("spmv_inst_2");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_sub_1("n_sub_1");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_sub_2("n_sub_2");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_sub_3("n_sub_3");
+	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_sub_4("n_sub_4");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> y("y");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> y_update("y_update");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_next("x_next");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_apt("x_apt");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_bypass("x_bypass");
+	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_aXVec("fifo_aXVec");
 
-	tapa::streams<MultDVec, NUM_CH> fifo_node_to_edge("fifo_node_to_edge");
-	tapa::streams<MultDVec, NUM_CH> fifo_edge_to_node("fifo_edge_to_node");
-	tapa::streams<MultDVec, NUM_CH+1> fifo_broadcast("fifo_broadcast");
+	tapa::streams<MultDVec, NUM_CH, FIFO_DEPTH> fifo_node_to_edge("fifo_node_to_edge");
+	tapa::streams<MultDVec, NUM_CH, FIFO_DEPTH> fifo_edge_to_node("fifo_edge_to_node");
+	tapa::streams<MultDVec, NUM_CH+1, FIFO_DEPTH> fifo_broadcast("fifo_broadcast");
 
-	tapa::streams<int, NUM_CH+2> fifo_need("fifo_need");
+	tapa::streams<int, NUM_CH+2, FIFO_DEPTH> fifo_need("fifo_need");
 
 
 	tapa::task()

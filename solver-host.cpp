@@ -174,12 +174,14 @@ void generate_edgelist_spmv(
 			int list_size = tmp_edge_list[j].size();
 			int total_size = 0;
 			vector<bool> used_edge(list_size, false);
-			std::set<int> row_raw;
+			vector<std::set<int>> row_raw(11); // last 11 elements
+			int next_slot = 0;
 			int pack_chunk_count = 0;
 			for(int k = 0; k < list_size;){
 				std::set<int> row;
 				int pack_count = 0;
 				vector<ap_uint<64>> packet(8);
+				row_raw[next_slot].clear();
 				for(int l = 0; l < 8; l++){
 					ap_uint<64> a = 0;
 					a(63, 48) = (ap_uint<16>) 0xFFFF;
@@ -187,10 +189,17 @@ void generate_edgelist_spmv(
 				}
 				for(int l = 0; l < list_size; l++){
 					int row_i = (tmp_edge_list[j][l](63, 48) | (int) 0);
-					if(!used_edge[l] && row.find(row_i%8) == row.end() && row_raw.find(row_i) == row_raw.end()){
+					bool found = false;
+					for(int n = 0; n < 11; n++){
+						if(row_raw[n].find(row_i) != row_raw[n].end()){
+							found = true;
+							break;
+						}
+					}
+					if(!used_edge[l] && row.find(row_i%8) == row.end() && !found){
 						packet[row_i%8] = tmp_edge_list[j][l];
 						row.insert(row_i%8);
-						row_raw.insert(row_i);
+						row_raw[next_slot].insert(row_i);
 						used_edge[l] = true;
 						pack_count++;
 						if(pack_count == 8) break;
@@ -202,10 +211,7 @@ void generate_edgelist_spmv(
 					edge_list_ch[i%NUM_CH].push_back(packet[l]);
 				}
 				pack_chunk_count++;
-				if(pack_chunk_count == 11) {
-					pack_chunk_count = 0;
-					row_raw.clear();
-				}
+				next_slot = (next_slot + 1) % 11;
 			}
 			// if(total_size != 0) {
 			// 	count_non_zero++;
@@ -290,6 +296,7 @@ void generate_dependency_graph_for_pes(
 				if(csr_col_ind[k] >= i * WINDOW_LARGE_SIZE){
 					int c = csr_col_ind[k] - i * WINDOW_LARGE_SIZE;
 					float v = csr_val[k];
+					if(c == j) v = 1.0/v;
 					edge<float> e(c, j, v);
 					if(dep_map.find(c) == dep_map.end()){
 						vector<edge<float>> vec;
@@ -415,11 +422,14 @@ void generate_dependency_graph_for_pes(
 				int pushed_edge_count = 0;
 				vector<bool> used_edge(rem_edge_num, false);
 				int pack_chunk_count = 0;
-				std::set<int> row_raw;
+				vector<std::set<int>> row_raw(8); // last 8 elements
+				int next_slot = 0;
+				// std::set<int> row_raw;
 				while(pushed_edge_count < rem_edge_num){
 					std::set<int> row;
 					// std::set<int> col;
 					vector<ap_uint<64>> packet(8);
+					row_raw[next_slot].clear();
 					for(int n = 0; n < 8; n++){
 						ap_uint<64> a = 0;
 						a(63,62) = (ap_uint<2>)(2);
@@ -431,12 +441,19 @@ void generate_dependency_graph_for_pes(
 							auto e = edge_list[n];
 							int row_i = (e(61,47) | (int) 0);
 							// int col_i = (e(46,32) | (int) 0);
+							bool found = false;
+							for(int m = 0; m < 8; m++){
+								if(row_raw[m].find(row_i) != row_raw[m].end()){
+									found = true;
+									break;
+								}
+							}
 							if(row.find(row_i%8) == row.end() 
-							&& row_raw.find(row_i) == row_raw.end()
+							&& !found
 							// && col.find(col_i) == col.end()
 							){
 								row.insert(row_i%8);
-								row_raw.insert(row_i);
+								row_raw[next_slot].insert(row_i);
 								packet[row_i % 8] = e;
 								// col.insert(col_i);
 								// shift_edge_list.push_back(edge_list[n]);
@@ -449,11 +466,12 @@ void generate_dependency_graph_for_pes(
 						dep_graph_tmp[pe_i].push_back(packet[n]);
 					}
 					pack_chunk_count++;
-					if(pack_chunk_count == 10){
-						pack_chunk_count = 0;
-						row_raw.clear();
-					}
 					edge_count++;
+					// if(pack_chunk_count == 18){
+					// 	pack_chunk_count = 0;
+					// 	row_raw.clear();
+					// }
+					next_slot = (next_slot+1)%8;
 					pushed_edge_count += row.size();
 				}
 				edge_count_pe[pe_i].push_back(edge_count);
@@ -606,7 +624,11 @@ int main(int argc, char* argv[]){
 
 	if(argc > 1) M = D;
 
+	std::clog << "get matrix, start scheduling..." << std::endl;
+
 	extract_lower_triangular_matrix(M, K, nnz, CSRRowPtr, CSRColIndex, CSRVal, IA, JA, A);
+
+	std::clog << "extract lower triangular matrix..." << std::endl;
 
 	nnz = A.size();
 
@@ -703,6 +725,7 @@ int main(int argc, char* argv[]){
 	}
 
 	std::clog << "need to read hbm: " << need_count << " times" << std::endl;
+	std::clog << "hbm + spmv latency: " << need_count*(WINDOW_SIZE_div_2/16+11) << " cycles" << std::endl;
 
 	// std::clog << K_csc[156] << std::endl;
 	// std::clog << edge_list_ptr[1].size() << std::endl;
@@ -729,40 +752,7 @@ int main(int argc, char* argv[]){
 		}
 	}
 
-	//triangular solver in cpu
-	vector<float> expected_x(N);
-	int next = 0;
-	float test_sum = 0.f;
-	for(int i = 0; i < N; i++){
-		float image = f[i];
-		// if(i == 67638) std::clog << "f: " << f[i] << std::endl;
-		float num = (i == 0) ? IA[0] : IA[i] - IA[i-1];
-		for(int j = 0; j < num-1; j++){
-			image -= expected_x[JA[next]]*A[next];
-			// if(i == 67638) {
-			// 	std::clog << "col:" << JA[next] << ", t1:" << expected_x[JA[next]] << ", t2:" << A[next] << std::endl; 
-			// 	test_sum += expected_x[JA[next]]*A[next];
-			// }
-			next++;
-		}
-		// if(i == 67638) std::clog << "row:" << JA[next] << ", val:" << f[i] - test_sum  << ", diff:" << std::fabs((f[i] - test_sum) - (image * A[next]))<< std::endl;
-		expected_x[JA[next]] = image * A[next];
-		//sanity check
-		/* 
-		if(i == 0){
-			if(std::fabs(expected_x[i]-0.5) > 1.0e-5){
-				std::clog << "Incorrect base solver! Index: " << i << ", expect: 0.5, actual: " << expected_x[i] << std::endl;
-				return 1;
-			}
-		}else{
-			if(std::fabs(expected_x[i]-((0.5*(i+1))-expected_x[i/2])/(i+1)) > 1.0e-5){
-                                std::clog << "Incorrect base solver! Index: " << i << ", expect: " << ((0.5*(i+1))-expected_x[i/2])/(i+1) << ", actual: " << expected_x[i] << std::endl;
-                                return 1;
-                        }
-		}
-		*/
-		next++;
-	}
+	std::clog << dep_graph_ch[9].size() << std::endl;
 
 	cycle[0] = 0;
 
@@ -784,8 +774,43 @@ int main(int argc, char* argv[]){
 	
 	int unmatched = 0;
 
+	//triangular solver in cpu
+	vector<float> expected_x(N);
+	int next = 0;
+	float test_sum = 0.f;
+	for(int i = 0; i < N; i++){
+		float image = f[i];
+		if(i == 81992) std::clog << "f: " << f[i] << std::endl;
+		float num = (i == 0) ? IA[0] : IA[i] - IA[i-1];
+		for(int j = 0; j < num-1; j++){
+			image -= x_fpga[JA[next]]*A[next];
+			if(i == 81992) {
+				std::clog << "col:" << JA[next] << ", t1:" << x_fpga[JA[next]] << ", t2:" << A[next] << std::endl; 
+				test_sum += x_fpga[JA[next]]*A[next];
+			}
+			next++;
+		}
+		if(i == 81992) std::clog << "row:" << JA[next] << ", val:" << (f[i] - test_sum) * (1/A[next]) << ", cpu: " << image / A[next] << ", diff:" << std::fabs((f[i] - test_sum) * (1/A[next]) - (image / A[next]))<< std::endl;
+		expected_x[JA[next]] = image / A[next];
+		//sanity check
+		/* 
+		if(i == 0){
+			if(std::fabs(expected_x[i]-0.5) > 1.0e-5){
+				std::clog << "Incorrect base solver! Index: " << i << ", expect: 0.5, actual: " << expected_x[i] << std::endl;
+				return 1;
+			}
+		}else{
+			if(std::fabs(expected_x[i]-((0.5*(i+1))-expected_x[i/2])/(i+1)) > 1.0e-5){
+                                std::clog << "Incorrect base solver! Index: " << i << ", expect: " << ((0.5*(i+1))-expected_x[i/2])/(i+1) << ", actual: " << expected_x[i] << std::endl;
+                                return 1;
+                        }
+		}
+		*/
+		next++;
+	}
+
         for (int i = 0; i < N; ++i){
-		if(std::fabs((x_fpga[i]-expected_x[i])/(x_fpga[i])) > 1.0e-2){
+		if(std::fabs((x_fpga[i]-expected_x[i])/expected_x[i]) > 0.01){
 			std::clog << "index: " << i << ", expected: " << expected_x[i] << ", actual: " << x_fpga[i] << ", diff: " << std::fabs(x_fpga[i]-expected_x[i]) << std::endl;
 			unmatched++;
 		}

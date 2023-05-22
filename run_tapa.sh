@@ -12,6 +12,6 @@ tapac \
     --min-area-limit 0.58 \
     --min-slr-width-limit 5000 \
     --max-slr-width-limit 18000 \
-    --max-parallel-synth-jobs 12 \
+    --max-parallel-synth-jobs 16 \
     --floorplan-output solver.tcl \
     solver-general.cpp 

@@ -145,14 +145,14 @@ void load_S_matrix(FILE * f_A,
             fscanf(f_A, "%d %d\n", &r_idx, &c_idx);
             value = 1.0;
         }else {
-            fscanf(f_A, "%d %d %lf\n", &r_idx, &c_idx, &value);
+            fscanf(f_A, "%d %d %f\n", &r_idx, &c_idx, &value);
         }
         
         //unsigned int * tmpPointer_v = reinterpret_cast<unsigned int*>(&value);
         //unsigned int uint_v = *tmpPointer_v;
         
-        uint64_t * tmpPointer_v = reinterpret_cast<uint64_t*>(&value);
-        uint64_t uint_v = *tmpPointer_v;
+        unsigned int * tmpPointer_v = reinterpret_cast<unsigned int*>(&value);
+        unsigned int uint_v = *tmpPointer_v;
         
         if (uint_v != 0) {
             if (r_idx < 1 || c_idx < 1) { // report error
@@ -214,6 +214,8 @@ void read_suitsparse_matrix_FP64(char * filename_A,
     
     load_S_matrix(f_A, nnz_mmio, nnz, cooRowIndex, cooColIndex, eleVal, matcode);
     
+    cout << "finish loading matrix" << "\n";
+
     fclose(f_A);
     
     if (mf == CSR) {
