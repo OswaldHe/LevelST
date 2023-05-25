@@ -875,38 +875,6 @@ void read_all_ptr(
 		}
 	}
 
-// void X_Merger(int pe_i, int N, tapa::istream<float_v16>& x_first, tapa::istream<float_v16>& x_second, tapa::istream<float_v16>& x_bypass, tapa::ostream<float_v16>& x_out, tapa::istream<int>& N_in){
-// 	int level = N % (WINDOW_LARGE_SIZE) == 0 ? N / WINDOW_LARGE_SIZE : N/WINDOW_LARGE_SIZE + 1;
-// 	int last = (N % WINDOW_LARGE_SIZE)%WINDOW_SIZE == 0 ? (N % WINDOW_LARGE_SIZE)/WINDOW_SIZE - 1:(N % WINDOW_LARGE_SIZE)/WINDOW_SIZE;
-// 	const int num_ite_x = ((N % (WINDOW_SIZE * NUM_CH)) + 15)/16;
-// 	for(int round = 0; round < level;round++){
-// #pragma HLS loop_flatten off
-// 		const int num_x = N_in.read();
-
-// 		if(round == level-1 && pe_i > last && last != -1){
-// bypass:
-// 			for(int i = 0; i < num_ite_x; i++){
-// 				#pragma HLS loop_tripcount min=1 max=385
-// 				x_out.write(x_bypass.read());
-// 			}
-// 		} else {
-
-// first:
-// 			for(int i = 0; i < pe_i * WINDOW_SIZE_div_16; i++){
-// 				#pragma HLS loop_tripcount min=1 max=320
-// 				x_out.write(x_first.read());
-// 			}
-
-// 			const int num_ite = (num_x + 15) / 16;
-// second:
-// 			for(int i = 0; i < num_ite; i++){
-// 				#pragma HLS loop_tripcount min=1 max=64
-// 				x_out.write(x_second.read());
-// 			}
-// 		}
-// 	}
-// }
-
 void X_Merger(int N, tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
 	int remain = (N + 15) / 16;
 	int c_idx = 0;
@@ -927,33 +895,6 @@ write_x:
 		remain -= WINDOW_SIZE_div_16;
 	}
 }
-
-// void X_bypass(int pe_i, int N, tapa::istream<float_v16>& fifo_x_in, tapa::ostream<float_v16>& fifo_x_out, tapa::ostream<float_v16>& fifo_x_bypass){
-// 	int level = N % (WINDOW_LARGE_SIZE) == 0 ? N / WINDOW_LARGE_SIZE : N/WINDOW_LARGE_SIZE + 1;
-// 	int last = (N % WINDOW_LARGE_SIZE)%WINDOW_SIZE == 0 ? (N % WINDOW_LARGE_SIZE)/WINDOW_SIZE - 1:(N % WINDOW_LARGE_SIZE)/WINDOW_SIZE;
-// 	const int num_ite = ((N % (WINDOW_SIZE * NUM_CH)) + 15)/16;
-// 	if(pe_i == 0){
-// 		fifo_x_in.read();
-// 	}else {
-// round: 
-// 		for(int round = 0; round < level ;round++){
-// #pragma HLS loop_flatten off
-// 			if(round < level-1 || pe_i <= last || last == -1){
-// 		through:
-// 				for(int j = 0; j < WINDOW_SIZE_div_16*pe_i; j++){
-// 					#pragma HLS loop_tripcount min=1 max=320
-// 					fifo_x_out.write(fifo_x_in.read());
-// 				}
-// 			}else{
-// 		bypass:
-// 				for(int j = 0; j < num_ite; j++){
-// 					#pragma HLS loop_tripcount min=1 max=385
-// 					fifo_x_bypass.write(fifo_x_in.read());
-// 				}
-// 			}
-// 		}
-// 	}
-// }
 
 void read_len( const int N, const int NUM_ITE,
 	tapa::ostreams<int, NUM_CH>& N_val){
