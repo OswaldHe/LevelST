@@ -9,7 +9,7 @@ tapac \
     --enable-hbm-binding-adjustment \
     --enable-synth-util \
     --run-floorplan-dse \
-    --min-area-limit 0.58 \
+    --min-area-limit 0.54 \
     --min-slr-width-limit 5000 \
     --max-slr-width-limit 18000 \
     --max-parallel-synth-jobs 16 \
