@@ -21,10 +21,10 @@ using std::vector;
 
 constexpr int NUM_CH = 10;
 constexpr int WINDOW_SIZE = 8192;
-constexpr int WINDOW_SIZE_div_2 = 512;
+constexpr int WINDOW_SIZE_div_2 = 8192;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE*NUM_CH;
 int WINDOW_SIZE_SPMV = 32;
-int MULT_SIZE = 16;
+int MULT_SIZE = 1;
 
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
@@ -38,7 +38,9 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N,
-			const int NUM_ITE
+			const int NUM_ITE,
+			const int W,
+			const int M
 			// tapa::mmap<int> K_csc
 			);
 
@@ -251,8 +253,10 @@ void process_spmv_ptr(
 	vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
 	vector<aligned_vector<int>>& edge_list_ptr,
 	vector<aligned_vector<ap_uint<64>>>& edge_list_ch_out,
-	aligned_vector<int>& edge_list_ptr_out){
+	aligned_vector<int>& edge_list_ptr_out,
+	int& max){
 		vector<int> offset(NUM_CH, 0);
+		max = 0;
 		for(int i = 0; i < edge_list_ptr[0].size(); i++){
 			int maxLen = 0;
 			for(int j = 0; j < NUM_CH; j++){
@@ -261,6 +265,7 @@ void process_spmv_ptr(
 				}
 			}
 			edge_list_ptr_out.push_back(maxLen);
+			max += maxLen;
 			for(int j = 0; j < NUM_CH; j++){
 				for(int k = offset[j]; k < edge_list_ptr[j][i] + offset[j]; k++){
 					edge_list_ch_out[j].push_back(edge_list_ch[j][k]);
@@ -714,9 +719,11 @@ int main(int argc, char* argv[]){
 	aligned_vector<int> merge_inst_ptr;
 	aligned_vector<int> if_need;
 
+	int maxLenCounter = 0;
+
 	convertCSRToCSC(N, nnz, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
 	generate_edgelist_spmv(N, IA, JA, A, edge_list_ch, edge_list_ptr, if_need);
-	process_spmv_ptr(edge_list_ch, edge_list_ptr, edge_list_ch_mod, edge_list_ptr_mod);
+	process_spmv_ptr(edge_list_ch, edge_list_ptr, edge_list_ch_mod, edge_list_ptr_mod, maxLenCounter);
 	generate_dependency_graph_for_pes(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
 	merge_ptr(N, dep_graph_ptr, edge_list_ptr_mod, merge_inst_ptr);
 
@@ -726,7 +733,7 @@ int main(int argc, char* argv[]){
 	}
 
 	std::clog << "need to read hbm: " << need_count << " times" << std::endl;
-	std::clog << "hbm + spmv latency: " << need_count*(WINDOW_SIZE_div_2/16+11) << " cycles" << std::endl;
+	std::clog << "hbm + spmv latency: " << need_count*(WINDOW_SIZE_div_2/16+10) + (if_need.size()-need_count) + maxLenCounter/8 << " cycles" << std::endl;
 
 	// std::clog << K_csc[156] << std::endl;
 	// std::clog << edge_list_ptr[1].size() << std::endl;
@@ -769,7 +776,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmap<int>(merge_inst_ptr),
 						tapa::read_only_mmap<float>(f).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(),
-						tapa::read_only_mmap<int>(if_need), N, NUM_ITE
+						tapa::read_only_mmap<int>(if_need), N, NUM_ITE, WINDOW_SIZE_div_2, MULT_SIZE
 						// tapa::read_only_mmap<int>(K_csc)
 						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
