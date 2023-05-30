@@ -83,17 +83,16 @@ void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istr
 	}
 }
 
-void write_x(const int W, tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
-	int num_block = total_N / W;
+void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
+	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
 	    // LOG(INFO) << "process level " << i << " ...";
-		int start = (W >> 4)*i;
-		int N = (W >> 4);
+		int start = WINDOW_SIZE_div_16*i;
 
 write_main:
-		for(int i_req = 0, i_resp = 0; i_resp < N;){
+		for(int i_req = 0, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
 			#pragma HLS pipeline II=1
-			if((i_req < N) & !x.empty() & !mmap.write_addr.full() & !mmap.write_data.full()){
+			if((i_req < WINDOW_SIZE_div_16) & !x.empty() & !mmap.write_addr.full() & !mmap.write_data.full()){
 				mmap.write_addr.try_write(i_req + start);
 				float_v16 tmp; 
 				x.try_read(tmp);
@@ -109,8 +108,8 @@ write_main:
 	}
 
 	//residue
-	int residue = ((total_N % W) + 15)/16;
-	int offset = num_block * (W >> 4);
+	int residue = ((total_N % WINDOW_SIZE) + 15)/16;
+	int offset = num_block * WINDOW_SIZE_div_16;
 
 write_residue:
 	for(int i_req = 0, i_resp = 0; i_resp < residue;){
@@ -174,8 +173,6 @@ void read_f(const int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float
 
 //TODO: replace with serpen after modifying the read width
 void PEG_Xvec(const int NUM_ITE,
-	const int W,
-	const int M,
 	tapa::istream<int>& fifo_inst_in, tapa::ostream<int>& fifo_inst_out,
 	tapa::istream<ap_uint<512>>& spmv_A, // 16-bit row + 16-bit col + 32-bit float
 	tapa::ostream<MultXVec>& fifo_aXVec,
@@ -189,9 +186,9 @@ round:
 #pragma HLS loop_flatten off
 
 load_x:
-			for(int ite = 0; ite < (round*NUM_CH)*M; ite++){
+			for(int ite = 0; ite < (round*NUM_CH); ite++){
 
-				float local_x[4][WINDOW_SIZE_MAX];
+				float local_x[4][WINDOW_SIZE];
 #pragma HLS bind_storage variable=local_x latency=2
 #pragma HLS array_partition variable=local_x complete dim=1
 #pragma HLS array_partition variable=local_x cyclic factor=8 dim=2
@@ -204,7 +201,7 @@ load_x:
 				const int num_ite = (N + 7) / 8;
 				//read x
 				if(need == 1){
-					for(int i = 0; i < (W >> 4);){
+					for(int i = 0; i < WINDOW_SIZE_div_16;){
 						#pragma HLS pipeline II=1
 						if(!req_x_in.empty()){
 							float_v16 x_val; req_x_in.try_read(x_val);
@@ -252,7 +249,6 @@ compute:
 	}
 
 void PEG_YVec(const int NUM_ITE,
-	const int M,
 	tapa::istream<int>& fifo_inst_in,
 	tapa::istream<MultXVec>& fifo_aXVec,
 	tapa::ostream<float_v16>& fifo_y_out,
@@ -277,7 +273,7 @@ reset:
 			}
 
 load_axv:
-			for(int ite = 0; ite < (round*NUM_CH)*M; ite++){
+			for(int ite = 0; ite < (round*NUM_CH); ite++){
 				const int N = fifo_inst_in.read();
 				const int num_ite = (N + 7) / 8;
 
@@ -925,8 +921,6 @@ void fill_zero_dvec(tapa::ostream<MultDVec>& fifo_out){
 }
 
 void read_x(const int NUM_ITE, 
-	const int W,
-	const int M,
 	tapa::istream<int>& fifo_inst_in, 
 	tapa::ostream<int>& fifo_inst_out, 
 	tapa::ostream<int>& block_id, 
@@ -934,13 +928,13 @@ void read_x(const int NUM_ITE,
 	tapa::ostream<float_v16>& fifo_x_out){
 
 	for(int round = 0; round < NUM_ITE; round++){
-		for(int ite = 0; ite < (round*NUM_CH)*M; ite++){
+		for(int ite = 0; ite < (round*NUM_CH); ite++){
 			int need = fifo_inst_in.read();
 			fifo_inst_out.write(need);
 
 			if(need == 1){
 				block_id.write(ite);
-				for(int i = 0; i < (W >> 4);){
+				for(int i = 0; i < WINDOW_SIZE_div_16;){
 					#pragma HLS pipeline II=1
 					if(!fifo_x_in.empty()){
 						float_v16 x_val; fifo_x_in.try_read(x_val);
@@ -953,7 +947,7 @@ void read_x(const int NUM_ITE,
 	}
 }
 
-void request_X(const int W, tapa::async_mmap<float_v16>& mmap, tapa::istream<int>& block_id, tapa::ostream<float_v16>& fifo_x_out, tapa::istream<bool>& fin_write){
+void request_X(tapa::async_mmap<float_v16>& mmap, tapa::istream<int>& block_id, tapa::ostream<float_v16>& fifo_x_out, tapa::istream<bool>& fin_write){
 
 	int block = 0;
 	int block_done = 0;
@@ -975,10 +969,10 @@ scan:
 			else {
 				block_id.read(nullptr);
 load_x_to_cache:
-				for(int i_req = block * (W >> 4), i_resp = 0; i_resp < (W >> 4);){
+				for(int i_req = block * WINDOW_SIZE_div_16, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
 #pragma HLS pipeline II=1
 #pragma HLS loop_tripcount min=0 max=32
-					if((i_req < (block+1) * (W >> 4)) & !mmap.read_addr.full()){
+					if((i_req < (block+1) * WINDOW_SIZE_div_16) & !mmap.read_addr.full()){
 						mmap.read_addr.try_write(i_req);
 						++i_req;
 					}
@@ -1003,9 +997,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N, // # of dimension
-			const int NUM_ITE, // # number of rounds
-			const int W, // block size
-			const int M // mult size
+			const int NUM_ITE // # number of rounds
 			){
 
 	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_val("n_val");
@@ -1047,9 +1039,9 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::task()
 		.invoke<tapa::join>(read_len, N, NUM_ITE, N_val)
 		// .invoke<tapa::join>(fill_zero, x_q)
-		.invoke<tapa::detach>(request_X, W, x, block_id, req_x, fin_write)
+		.invoke<tapa::detach>(request_X, x, block_id, req_x, fin_write)
 		.invoke<tapa::join>(read_all_ptr, if_need, fifo_need)
-		.invoke<tapa::join>(read_x, NUM_ITE, W, M, fifo_need, fifo_need, block_id, req_x, req_x)
+		.invoke<tapa::join>(read_x, NUM_ITE, fifo_need, fifo_need, block_id, req_x, req_x)
 		.invoke<tapa::join>(read_f, N, f, f_q)
 		// .invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
 		.invoke<tapa::join>(read_all_ptr, merge_inst_ptr, merge_inst_q)
@@ -1061,10 +1053,10 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join, NUM_CH>(read_dep_graph, tapa::seq(), NUM_ITE, dep_graph_ch, dep_graph_ptr_q, dep_graph_ptr_q, dep_graph_ch_node, dep_graph_ch_edge, dep_graph_inst, dep_graph_inst_edge)
 		.invoke<tapa::detach>(black_hole_int, dep_graph_ptr_q)
 		// .invoke<tapa::join, NUM_CH>(X_bypass, tapa::seq(), N, x_q, x_apt, x_bypass)
-		.invoke<tapa::join, NUM_CH>(PEG_Xvec, NUM_ITE, W, M, spmv_inst, spmv_inst_2, spmv_val, fifo_aXVec, fifo_need, fifo_need, req_x, req_x)
+		.invoke<tapa::join, NUM_CH>(PEG_Xvec, NUM_ITE, spmv_inst, spmv_inst_2, spmv_val, fifo_aXVec, fifo_need, fifo_need, req_x, req_x)
 		.invoke<tapa::detach>(black_hole_float_vec, req_x)
 		.invoke<tapa::detach>(black_hole_int, fifo_need)
-		.invoke<tapa::join, NUM_CH>(PEG_YVec, NUM_ITE, M, spmv_inst_2, fifo_aXVec, y, N_val, N_sub_1)
+		.invoke<tapa::join, NUM_CH>(PEG_YVec, NUM_ITE, spmv_inst_2, fifo_aXVec, y, N_val, N_sub_1)
 		.invoke<tapa::detach, NUM_CH>(Yvec_minus_f, f_q, y, y_update, N_sub_1, N_sub_2)
 		// .invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, y_update, x_next, N_sub_2, N_sub_3)
 		.invoke<tapa::detach, NUM_CH>(solve_node, dep_graph_ch_node, dep_graph_inst, y_update, fifo_node_to_edge, fifo_edge_to_node, N_sub_2, N_sub_3)
@@ -1072,5 +1064,5 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::detach, NUM_CH>(solve_edge, tapa::seq(), dep_graph_ch_edge, dep_graph_inst_edge, fifo_node_to_edge, fifo_edge_to_node, fifo_broadcast, fifo_broadcast, x_q, N_sub_3)
 		.invoke<tapa::detach>(black_hole_dvec, fifo_broadcast)
 		.invoke<tapa::join>(X_Merger, N, x_q, x_next)
-		.invoke<tapa::join>(write_x, W, x_next, fin_write, x, N);
+		.invoke<tapa::join>(write_x, x_next, fin_write, x, N);
 }

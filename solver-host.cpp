@@ -38,9 +38,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N,
-			const int NUM_ITE,
-			const int W,
-			const int M
+			const int NUM_ITE
 			// tapa::mmap<int> K_csc
 			);
 
@@ -776,7 +774,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmap<int>(merge_inst_ptr),
 						tapa::read_only_mmap<float>(f).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(),
-						tapa::read_only_mmap<int>(if_need), N, NUM_ITE, WINDOW_SIZE_div_2, MULT_SIZE
+						tapa::read_only_mmap<int>(if_need), N, NUM_ITE
 						// tapa::read_only_mmap<int>(K_csc)
 						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
