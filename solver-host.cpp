@@ -738,23 +738,17 @@ int main(int argc, char* argv[]){
 	// std::clog << csc_row_ind[2] << std::endl;
 
 	for(int i = 0; i < NUM_CH; i++){
-		if(edge_list_ch[i].size() == 0){
+		if(edge_list_ch_mod[i].size() == 0){
 			for(int j = 0; j < 8; j++){
 				ap_uint<64> a = 0;
-				edge_list_ch[i].push_back(a);
+				edge_list_ch_mod[i].push_back(a);
 			}
 		}
-		if(edge_list_ptr[i].size() == 0){
-			edge_list_ptr[i].push_back(0);
-		}
-		if(csc_col_ptr_fpga[i].size() == 0){
-			csc_col_ptr_fpga[i].push_back(0);
-		}
-		if(csc_row_ind_fpga[i].size() == 0){
-			csc_row_ind_fpga[i].push_back(0);
-		}
-		if(f_fpga[i].size() == 0){
-			f_fpga[i].push_back(0.0);
+		if(dep_graph_ch[i].size() == 0){
+			for(int j = 0; j < 8; j++){
+				ap_uint<64> a = 0;
+				dep_graph_ch[i].push_back(a);
+			}
 		}
 	}
 
@@ -788,17 +782,17 @@ int main(int argc, char* argv[]){
 	float test_sum = 0.f;
 	for(int i = 0; i < N; i++){
 		float image = f[i];
-		if(i == 81992) std::clog << "f: " << f[i] << std::endl;
+		if(i == 59816) std::clog << "f: " << f[i] << std::endl;
 		float num = (i == 0) ? IA[0] : IA[i] - IA[i-1];
 		for(int j = 0; j < num-1; j++){
 			image -= x_fpga[JA[next]]*A[next];
-			if(i == 81992) {
+			if(i == 59816) {
 				std::clog << "col:" << JA[next] << ", t1:" << x_fpga[JA[next]] << ", t2:" << A[next] << std::endl; 
 				test_sum += x_fpga[JA[next]]*A[next];
 			}
 			next++;
 		}
-		if(i == 81992) std::clog << "row:" << JA[next] << ", val:" << (f[i] - test_sum) * (1/A[next]) << ", cpu: " << image / A[next] << ", diff:" << std::fabs((f[i] - test_sum) * (1/A[next]) - (image / A[next]))<< std::endl;
+		if(i == 59816) std::clog << "row:" << JA[next] << ", val:" << (f[i] - test_sum) * (1/A[next]) << ", cpu: " << image / A[next] << ", diff:" << std::fabs((f[i] - test_sum) * (1/A[next]) - (image / A[next]))<< std::endl;
 		expected_x[JA[next]] = image / A[next];
 		//sanity check
 		/* 

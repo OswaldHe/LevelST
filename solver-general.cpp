@@ -58,31 +58,6 @@ void black_hole_dvec(tapa::istream<MultDVec>& fifo_in){
 	bh(fifo_in);
 }
 
-void read_int_vec(int pe_i, int total_N, tapa::async_mmap<int>& mmap, tapa::istream<int>& len_in, tapa::ostream<int>& len_out,
-                 tapa::ostream<int>& stream) {
-	int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
-	int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
-	int offset = 0;
-	for(int round = 0; round < bound; round++){
-#pragma HLS loop_flatten off
-		const int N = len_in.read();
-		len_out.write(N);
-		for (int i_req = 0, i_resp = 0; i_resp < N;) {
-				if(i_req < N && !mmap.read_addr.full()){
-						mmap.read_addr.try_write(i_req+offset);
-						++i_req;
-				}
-				if(!mmap.read_data.empty() && !stream.full()){
-						int tmp;
-						mmap.read_data.try_read(tmp);
-						stream.try_write(tmp);
-						++i_resp;
-				}
-		}
-		offset += N;
-	}
-}
-
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
@@ -127,32 +102,6 @@ write_residue:
 	fin_write.write(false);
 }
 
-void read_float_vec(int pe_i, int total_N, tapa::async_mmap<float_v16>& mmap, tapa::istream<int>& len_in, tapa::ostream<int>& len_out,
-                 tapa::ostream<float_v16>& stream) {
-	int level = (total_N%WINDOW_SIZE == 0)?total_N/WINDOW_SIZE:total_N/WINDOW_SIZE+1;
-	int bound = (level%NUM_CH>pe_i)?level/NUM_CH+1:level/NUM_CH;
-	int offset = 0;
-	for(int round = 0; round < bound; round++){
-#pragma HLS loop_flatten off
-		const int N = len_in.read();
-		len_out.write(N);
-		const int num_ite = (N + 15) / 16;
-		for (int i_req = 0, i_resp = 0; i_resp < num_ite;) {
-				if(i_req < num_ite && !mmap.read_addr.full()){
-						mmap.read_addr.try_write(i_req+offset);
-						++i_req;
-				}
-				if(!mmap.read_data.empty() && !stream.full()){
-						float_v16 tmp;
-						mmap.read_data.try_read(tmp);
-						stream.try_write(tmp);
-						++i_resp;
-				}
-		}
-		offset+=num_ite;
-	}
-}
-
 void read_f(const int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float_v16, NUM_CH>& f_fifo_out){
 	const int num_ite = (N + 15) / 16;
 	for(int i_req = 0, i_resp = 0, c_idx = 0; i_resp < num_ite;){
@@ -171,7 +120,6 @@ void read_f(const int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float
 	}
 }
 
-//TODO: replace with serpen after modifying the read width
 void PEG_Xvec(const int NUM_ITE,
 	tapa::istream<int>& fifo_inst_in, tapa::ostream<int>& fifo_inst_out,
 	tapa::istream<ap_uint<512>>& spmv_A, // 16-bit row + 16-bit col + 32-bit float
