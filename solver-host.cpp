@@ -1015,7 +1015,7 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<ap_uint<64>>> edge_list_ch_mod(NUM_CH);
 	aligned_vector<int> edge_list_ptr_mod;
 	aligned_vector<float> f_fpga;
-	aligned_vector<float> x_fpga(((N+15)/16)*16, 0.0);
+	aligned_vector<float> x_fpga(((N+159)/160)*160, 0.0);
 	aligned_vector<int> K_fpga;
 
 	// for(int i = 0; i < NUM_CH; i++){
@@ -1038,14 +1038,35 @@ int main(int argc, char* argv[]){
 
 	// reordering
 	int bound = (f.size() % WINDOW_LARGE_SIZE == 0) ? f.size() /WINDOW_LARGE_SIZE : (f.size()/WINDOW_LARGE_SIZE + 1);
+	vector<aligned_vector<float>> f_ch(NUM_CH);
 	for(int i = 0; i < bound; i++){
-		vector<aligned_vector<float>> f_ch(NUM_CH);
 		for(int j = i*WINDOW_LARGE_SIZE; j < (i+1)*WINDOW_LARGE_SIZE && j < f.size(); j++){
 			f_ch[(j-i*WINDOW_LARGE_SIZE)%NUM_CH].push_back(f[j]);
 		}
+		// make sure every ch has multi of 16
 		for(int j = 0; j < NUM_CH; j++){
-			for(int k = 0; k < f_ch[j].size(); k++){
-				f_fpga.push_back(f_ch[j][k]);
+			int size = f_ch[j].size();
+			for(int k = 0; k < size % 16; k++){
+				f_ch[j].push_back(0);
+			}
+		}
+	}
+	
+	int max = 0;
+	for(int j = 0; j < NUM_CH; j++){
+		if(max < f_ch[j].size()) max = f_ch[j].size();
+	}
+	for(int j = 0; j < NUM_CH; j++){
+		int size = f_ch[j].size();
+		for(int k = 0; k < max - size; k++){
+			f_ch[j].push_back(0);
+		}
+	}
+
+	for(int j = 0; j < f_ch[0].size()/16; j++){
+		for(int k = 0; k < NUM_CH; k++){
+			for(int l = 0; l < 16; l++){
+				f_fpga.push_back(f_ch[k][j*16+l]);
 			}
 		}
 	}

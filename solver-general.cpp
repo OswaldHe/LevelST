@@ -84,7 +84,7 @@ write_main:
 	}
 
 	//residue
-	int residue = ((total_N % WINDOW_SIZE) + 15)/16;
+	int residue = (((total_N % WINDOW_SIZE) + 159)/160) * 10;
 	int offset = num_block * WINDOW_SIZE_div_16;
 
 write_residue:
@@ -104,7 +104,7 @@ write_residue:
 }
 
 void read_f(const int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float_v16, NUM_CH>& f_fifo_out){
-	const int num_ite = (N + 15) / 16;
+	const int num_ite = ((N + 159) / 160)*10;
 	for(int i_req = 0, i_resp = 0, c_idx = 0; i_resp < num_ite;){
 		if((i_req < num_ite) & !mmap.read_addr.full()){
 				mmap.read_addr.try_write(i_req);
@@ -115,7 +115,7 @@ void read_f(const int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float
 				mmap.read_data.try_read(tmp);
 				f_fifo_out[c_idx].write(tmp);
 				++i_resp;
-				if(i_resp % WINDOW_SIZE_div_16 == 0) c_idx++;
+				c_idx++;
 				if(c_idx == NUM_CH) c_idx = 0;
 		}
 	}
@@ -457,6 +457,7 @@ compute:
 					if(!fifo_node_to_edge.empty()){
 						MultDVec node_block; fifo_node_to_edge.try_read(node_block);
 						fifo_next_pe.write(node_block);
+						fifo_prev_pe.read();
 
 						for(int k = 0; k < 8; k++){
 							#pragma HLS unroll
@@ -469,8 +470,6 @@ compute:
 								local_x[k][row>>3] = val;
 							}
 						}
-
-						fifo_prev_pe.read();
 						j++;
 					}
 				}
@@ -858,12 +857,16 @@ void X_Merger(int N, tapa::istreams<float, NUM_CH>& x_in, tapa::ostream<float_v1
 void read_len( const int N, const int NUM_ITE,
 	tapa::ostreams<int, NUM_CH>& N_val){
 	for(int i = 0; i < NUM_ITE; i++){
-#pragma HLS loop_flatten off
 		for(int j = 0; j < NUM_CH; j++){
-			int remain = N - i*WINDOW_LARGE_SIZE - j*WINDOW_SIZE;
+			int remain = N - i*WINDOW_LARGE_SIZE;
 			int len = WINDOW_SIZE;
-			if(remain < 0) len = 0;
-			else if(remain < WINDOW_SIZE) len = remain;
+			if(remain < WINDOW_LARGE_SIZE){
+				int res = remain % NUM_CH;
+				len = remain/NUM_CH;
+				if(res > 0){
+					len++;
+				}
+			}
 			N_val[j].write(len);
 		}
 	}
