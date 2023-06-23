@@ -663,6 +663,8 @@ void generate_dependency_graph_for_pes_cyclic(
 	aligned_vector<int>& dep_graph_ptr
 ){
 	int bound = (N % WINDOW_LARGE_SIZE == 0) ? N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
+	int total_iter_count = 0;
+	int total_effect_iter_count = 0;
 	for(int i = 0; i < bound; i++){
 		// std::clog << "level: " << i << std::endl;
 		vector<int> csrRowPtr;
@@ -741,8 +743,11 @@ void generate_dependency_graph_for_pes_cyclic(
 			int maxEdge = 0;
 			vector<vector<ap_uint<64>>> dep_graph_tmp(NUM_CH);
 
+			int effect_edge = 0;
+
 			//schedule each PEs
 			for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+				int max_effect_edge = 0;
 				int node_count = 0;
 				vector<ap_uint<64>> nodes = nodes_pe[pe_i];
 
@@ -842,8 +847,9 @@ void generate_dependency_graph_for_pes_cyclic(
 				}
 				edge_count_pe[pe_i].push_back(edge_count);
 				if(edge_count > maxEdge) maxEdge = edge_count;
-
+				if(edge_count > max_effect_edge) max_effect_edge = edge_count;
 			}
+			effect_edge += max_effect_edge;
 			// for(int j = 0; j < shift_edge_list.size(); j ++){
 			// 	dep_graph_ch[i%NUM_CH].push_back(shift_edge_list[j]);
 			// }
@@ -857,9 +863,10 @@ void generate_dependency_graph_for_pes_cyclic(
 			}
 
 			inst.push_back(maxNode);
-			LOG(INFO) << "maxnode:" << maxNode;
 			inst.push_back(maxEdge);
-			LOG(INFO) << "maxedge:" << maxEdge;
+
+			total_iter_count += (maxNode + maxEdge)*NUM_CH;
+			total_effect_iter_count += maxNode * NUM_CH + effect_edge;
 			
 			//process dep graph ptr
 			for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
@@ -915,6 +922,9 @@ void generate_dependency_graph_for_pes_cyclic(
 		}
 
 	}
+
+	LOG(INFO) << "total count: " << total_iter_count;
+	LOG(INFO) << "total effective count: " << total_effect_iter_count;
 
 	// for(int i = 0; i < NUM_CH; i++){
 	// 	int size = dep_graph_ptr[i].size();

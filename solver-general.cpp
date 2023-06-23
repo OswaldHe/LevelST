@@ -55,10 +55,6 @@ void black_hole_ap_uint(tapa::istream<ap_uint<512>>& fifo_in){
 	bh(fifo_in);
 }
 
-void black_hole_dvec(tapa::istream<MultDVec>& fifo_in){
-	bh(fifo_in);
-}
-
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
@@ -422,9 +418,9 @@ void solve_edge(
 for(;;){
 #pragma HLS loop_flatten off
 
-	// if(pe_i == 0 && !fifo_prev_pe.empty()){
-	// 	fifo_prev_pe.read(nullptr);
-	// }
+	if(pe_i == 0 && !fifo_prev_pe.empty()){ // HLS stuck??
+		fifo_prev_pe.read(nullptr);
+	}
 
 	const int N = N_in.read();
 	const int N_layer = dep_graph_ptr.read();
@@ -539,11 +535,11 @@ write_x:
 
 		}
 
-void forward(tapa::istream<MultDVec>& fifo_prev_pe, tapa::ostream<MultDVec>& fifo_next_pe){
+void forward(tapa::istream<MultDVec>& fifo_first, tapa::ostream<MultDVec>& fifo_last){
 	for(;;){
-		if(!fifo_prev_pe.empty()){
-			MultDVec tmp; fifo_prev_pe.try_read(tmp);
-			fifo_next_pe.write(tmp);
+		if(!fifo_first.empty()){
+			MultDVec tmp; fifo_first.try_read(tmp);
+			fifo_last.write(tmp);
 		}
 	}
 }
@@ -875,11 +871,6 @@ void read_len( const int N, const int NUM_ITE,
 void fill_zero(tapa::ostream<float_v16>& fifo_out){
 	float_v16 tmp_x;
 	fifo_out.try_write(tmp_x);
-}
-
-void fill_zero_dvec(tapa::ostream<MultDVec>& fifo_out){
-	MultDVec tmp;
-	fifo_out.try_write(tmp);
 }
 
 void read_x(const int NUM_ITE, 
