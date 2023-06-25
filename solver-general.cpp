@@ -412,7 +412,7 @@ void solve_edge(
 		tapa::ostream<MultDVec>& fifo_edge_to_node,
 		tapa::istream<MultDVec>& fifo_prev_pe,
 		tapa::ostream<MultDVec>& fifo_next_pe,
-		tapa::ostream<float>& x_out, 
+		tapa::ostream<float_v16>& x_out, 
 		tapa::istream<int>& N_in){
 
 for(;;){
@@ -453,7 +453,6 @@ compute:
 					if(!fifo_node_to_edge.empty()){
 						MultDVec node_block; fifo_node_to_edge.try_read(node_block);
 						fifo_next_pe.write(node_block);
-						fifo_prev_pe.read();
 
 						for(int k = 0; k < 8; k++){
 							#pragma HLS unroll
@@ -466,6 +465,9 @@ compute:
 								local_x[k][row>>3] = val;
 							}
 						}
+					}
+					if(!fifo_prev_pe.empty()){
+						fifo_prev_pe.read(nullptr);
 						j++;
 					}
 				}
@@ -523,11 +525,14 @@ compute:
 
 write_x:
 	for(int i = 0; i < num_ite; i++){ // TODO: write one float at a time
-		for(int j = 0; j < 16; j++){
 #pragma HLS loop_tripcount min=1 max=64
 #pragma HLS pipeline II=1
-			x_out.write(local_x[j%8][(i << 1) + (j >> 3)]);
+		float_v16 tmp_x;
+		for(int j = 0; j < 16; j++){
+			#pragma HLS unroll
+			tmp_x[j] = local_x[j%8][(i << 1) + (j >> 3)];
 		}
+		x_out.write(tmp_x);
 	}
 
 
@@ -818,35 +823,29 @@ void read_all_ptr(
 		}
 	}
 
-void X_Merger(int N, tapa::istreams<float, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
+void X_Merger(int N, tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
 	for(;;){
-		float_v16 tmp_x;
-		for(int i = 0, c_idx = 0; i < 8;){
-			bool flag_nop = false;
-			for(int j = 0; j < NUM_CH; j++){
-				flag_nop |= x_in[j].empty();
+		#pragma HLS pipeline II=10
+		bool flag_nop = false;
+		for(int i = 0; i < NUM_CH; i++){
+			flag_nop |= x_in[i].empty();
+		}
+		if(!flag_nop){
+			float_v16 bank[NUM_CH];
+			#pragma HLS array_partition variable=bank complete
+
+			for(int i = 0; i < NUM_CH; i++){
+				#pragma HLS unroll
+				float_v16 tmp_x; x_in[i].try_read(tmp_x);
+				for(int j = 0; j < 16; j++){
+					#pragma HLS unroll
+					bank[(i + j * NUM_CH)/16][(i + j * NUM_CH)%16] = tmp_x[j];
+				}
 			}
-			if(!flag_nop){
-				float_cyc tmp; 
-				for(int j = 0; j < NUM_CH; j++){
-					x_in[j].try_read(tmp[j]);
-				}
-				for(int j = 0; j < NUM_CH && j < 16-c_idx; j++){
-					tmp_x[c_idx+j] = tmp[j];
-				}
-				if(NUM_CH > 16 - c_idx){
-					x_out.write(tmp_x);
-					c_idx = NUM_CH - 16 + c_idx;
-					for(int j = 0; j < c_idx; j++){
-						tmp_x[j] = tmp[NUM_CH-c_idx+j];
-					}
-				} else {
-					c_idx += NUM_CH;
-				}
-				i++;
+			for(int i = 0; i < NUM_CH; i++){
+				x_out.write(bank[i]);
 			}
 		}
-		x_out.write(tmp_x);
 	}
 }
 
@@ -954,7 +953,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			){
 
 	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_val("n_val");
-	tapa::streams<float, NUM_CH, FIFO_DEPTH> x_q("x_pipe");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_q("x_pipe");
 	tapa::stream<bool, FIFO_DEPTH> fin_write("fin_write");
 	tapa::stream<int, FIFO_DEPTH> block_id("block_id");
 	tapa::streams<float_v16, NUM_CH+2, FIFO_DEPTH> req_x("req_x");

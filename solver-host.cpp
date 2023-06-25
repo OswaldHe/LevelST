@@ -1186,6 +1186,20 @@ int main(int argc, char* argv[]){
 						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
+
+
+	// // reorder
+	// for(int i = 0; i < x_fpga.size()/(16*NUM_CH); i++){
+	// 	vector<vector<float>> cache(NUM_CH);
+	// 	for(int j = i*(16*NUM_CH); j < (i+1)*(16*NUM_CH); j++){
+	// 		cache[(j-i*(16*NUM_CH))/16].push_back(x_fpga[j]);
+	// 	}
+	// 	for(int j = 0; j < NUM_CH; j++){
+	// 		for(int k = 0; k < 16; k++){
+	// 			x_fpga[i*(16*NUM_CH)+k*NUM_CH+j] = cache[j][k];
+	// 		}
+	// 	}
+	// }
 	
 	int unmatched = 0;
 
