@@ -1053,12 +1053,13 @@ int main(int argc, char* argv[]){
 		for(int j = i*WINDOW_LARGE_SIZE; j < (i+1)*WINDOW_LARGE_SIZE && j < f.size(); j++){
 			f_ch[(j-i*WINDOW_LARGE_SIZE)%NUM_CH].push_back(f[j]);
 		}
-		// make sure every ch has multi of 16
-		for(int j = 0; j < NUM_CH; j++){
-			int size = f_ch[j].size();
-			for(int k = 0; k < size % 16; k++){
-				f_ch[j].push_back(0);
-			}
+	}
+	
+	// make sure every ch has multi of 16
+	for(int j = 0; j < NUM_CH; j++){
+		int size = f_ch[j].size();
+		for(int k = 0; k < 16 - (size % 16); k++){
+			f_ch[j].push_back(0);
 		}
 	}
 	

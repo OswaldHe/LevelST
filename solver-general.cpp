@@ -56,7 +56,7 @@ void black_hole_ap_uint(tapa::istream<ap_uint<512>>& fifo_in){
 }
 
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
-	int num_block = total_N / WINDOW_SIZE;
+	int num_block = (total_N / WINDOW_LARGE_SIZE) * NUM_CH;
 	for(int i = 0; i < num_block; i++){
 	    // LOG(INFO) << "process level " << i << " ...";
 		int start = WINDOW_SIZE_div_16*i;
@@ -80,14 +80,17 @@ write_main:
 	}
 
 	//residue
-	int residue = (((total_N % WINDOW_SIZE) + 159)/160) * 10;
+	int residue = (((total_N % WINDOW_LARGE_SIZE) + 159)/160) * 10;
 	int offset = num_block * WINDOW_SIZE_div_16;
 
 write_residue:
 	for(int i_req = 0, i_resp = 0; i_resp < residue;){
-		if(i_req < residue && !x.empty() && !mmap.write_addr.full() && !mmap.write_data.full()){
+		#pragma HLS pipeline II=1
+		if((i_req < residue) & !x.empty() & !mmap.write_addr.full() & !mmap.write_data.full()){
 			mmap.write_addr.try_write(i_req + offset);
-			mmap.write_data.try_write(x.read(nullptr));
+			float_v16 tmp;
+			x.try_read(tmp);
+			mmap.write_data.try_write(tmp);
 			++i_req;
 		}
 		if(!mmap.write_resp.empty()){
@@ -306,7 +309,7 @@ read_spmv_and_subtract:
 	}
 
 void solve_node(
-	int pe_i,
+	const int pe_i,
 	tapa::istream<ap_uint<512>>& dep_graph_ch,
 	tapa::istream<int>& dep_graph_ptr,
 	tapa::istream<float_v16>& y_in,
@@ -405,7 +408,7 @@ compute:
 	}
 
 void solve_edge(
-		int pe_i,
+		const int pe_i,
 		tapa::istream<ap_uint<512>>& dep_graph_ch,
 		tapa::istream<int>& dep_graph_ptr,
 		tapa::istream<MultDVec>& fifo_node_to_edge,
@@ -418,7 +421,7 @@ void solve_edge(
 for(;;){
 #pragma HLS loop_flatten off
 
-	if(pe_i == 0 && !fifo_prev_pe.empty()){ // HLS stuck??
+	if(pe_i == -1 && !fifo_prev_pe.empty()){ // HLS stuck??
 		fifo_prev_pe.read(nullptr);
 	}
 
@@ -823,17 +826,20 @@ void read_all_ptr(
 		}
 	}
 
-void X_Merger(int N, tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
-	for(;;){
-		#pragma HLS pipeline II=10
+void X_Merger(tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
+	bool read_ok = true;
+	for(int w_idx = 0;;){
+		#pragma HLS pipeline II=1
+
+		float_v16 bank[NUM_CH];
+		#pragma HLS array_partition variable=bank complete
+		
 		bool flag_nop = false;
 		for(int i = 0; i < NUM_CH; i++){
+			#pragma HLS unroll
 			flag_nop |= x_in[i].empty();
 		}
-		if(!flag_nop){
-			float_v16 bank[NUM_CH];
-			#pragma HLS array_partition variable=bank complete
-
+		if((!flag_nop) && read_ok){
 			for(int i = 0; i < NUM_CH; i++){
 				#pragma HLS unroll
 				float_v16 tmp_x; x_in[i].try_read(tmp_x);
@@ -842,8 +848,14 @@ void X_Merger(int N, tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<floa
 					bank[(i + j * NUM_CH)/16][(i + j * NUM_CH)%16] = tmp_x[j];
 				}
 			}
-			for(int i = 0; i < NUM_CH; i++){
-				x_out.write(bank[i]);
+			read_ok = false;
+		}
+		if(!read_ok){
+			x_out.write(bank[w_idx]);
+			w_idx++;
+			if(w_idx == NUM_CH){
+				w_idx = 0;
+				read_ok = true;
 			}
 		}
 	}
@@ -1018,6 +1030,6 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::detach, NUM_CH>(solve_edge, tapa::seq(), dep_graph_ch_edge, dep_graph_inst_edge, fifo_node_to_edge, fifo_edge_to_node, fifo_broadcast, fifo_broadcast, x_q, N_sub_3)
 		.invoke<tapa::detach>(forward, fifo_broadcast, fifo_apt)
 		// .invoke<tapa::detach>(black_hole_dvec, fifo_broadcast)
-		.invoke<tapa::detach>(X_Merger, N, x_q, x_next)
+		.invoke<tapa::detach>(X_Merger, x_q, x_next)
 		.invoke<tapa::join>(write_x, x_next, fin_write, x, N);
 }
