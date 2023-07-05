@@ -874,7 +874,6 @@ void generate_dependency_graph_for_pes_cyclic(
 				int offset = 0;
 				int prev_size = dep_graph_ch[pe_i].size();
 				vector<ap_uint<64>> node_tmp_cache;
-				vector<vector<ap_uint<64>>> edge_tmp_cache(NUM_CH);
 				for(int b = offset; b < offset + node_count_pe[pe_i]*8; b++){
 					node_tmp_cache.push_back(dep_graph_tmp[pe_i][b]);
 				}
@@ -888,29 +887,24 @@ void generate_dependency_graph_for_pes_cyclic(
 					}
 				}
 				offset += node_count_pe[pe_i]*8;
-				for(int l = 0; l < maxNode*8; l++){
-					dep_graph_ch[pe_i].push_back(node_tmp_cache[l]);
-				}
 				for(int b = 0; b < NUM_CH; b++){
+					if(b == pe_i){
+						for(int l = 0; l < maxNode*8; l++){
+							dep_graph_ch[pe_i].push_back(node_tmp_cache[l]);
+						}
+					}
 					for(int l = offset; l < offset + edge_count_pe[pe_i][b]*8; l++){
-						edge_tmp_cache[b].push_back(dep_graph_tmp[pe_i][l]);
+						dep_graph_ch[pe_i].push_back(dep_graph_tmp[pe_i][l]);
 					}
 					for(int l = 0; l < maxEdge - edge_count_pe[pe_i][b]; l++){
 						for(int n = 0; n < 8; n++){
 							ap_uint<64> a = 0;
 							a(63,62) = (ap_uint<2>)(2);
 							a(61,47) = 0x7FFF;
-							edge_tmp_cache[b].push_back(a);
+							dep_graph_ch[pe_i].push_back(a);
 						}
 					}
 					offset += edge_count_pe[pe_i][b]*8;
-				}
-				for(int b = 0, c_idx = pe_i; b < NUM_CH; b++){
-					for(int l = 0; l < maxEdge*8; l++){
-						dep_graph_ch[pe_i].push_back(edge_tmp_cache[c_idx][l]);
-					}
-					c_idx--;
-					if(c_idx < 0) c_idx = NUM_CH-1;
 				}
 			}
 			layer_count++;

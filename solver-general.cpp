@@ -349,7 +349,7 @@ compute:
 			const int N_node = dep_graph_ptr.read();
 			const int N_edge = dep_graph_ptr.read();
 
-			if(level == 0){
+			if(level == pe_i){
 		compute_node:
 				for(int j = 0; j < N_node;){
 					#pragma HLS pipeline II=1
@@ -440,10 +440,6 @@ for(;;){
 #pragma HLS array_partition complete variable=local_x_tmp dim=2
 // #pragma HLS array_partition cyclic variable=local_x_tmp factor=2 dim=3	
 
-	MultDVec cache_struct[WINDOW_SIZE_div_8];
-#pragma HLS aggregate variable=cache_struct
-#pragma HLS array_partition cyclic variable=cache_struct factor=2
-
 compute:
     for(int i = 0; i < N_layer; i++){
 
@@ -451,15 +447,15 @@ compute:
 			const int N_node = dep_graph_ptr.read();
 			const int N_edge = dep_graph_ptr.read();
 
-			if(level == 0){ //TODO: read from solve_node, write to next pe, then read from prev pe
-		load_node_1:
+	load_node:
+			if(level == pe_i){ //TODO: read from solve_node, write to next pe, then read from prev pe
 				for(int j = 0; j < N_node;){
 					#pragma HLS pipeline II=1
 					#pragma HLS dependence variable=local_x false
 					#pragma HLS dependence variable=local_x_tmp false
 					if(!fifo_node_to_edge.empty()){
 						MultDVec node_block; fifo_node_to_edge.try_read(node_block);
-						cache_struct[j] = node_block;
+						fifo_next_pe.write(node_block);
 
 						for(int k = 0; k < 8; k++){
 							#pragma HLS unroll
@@ -472,21 +468,19 @@ compute:
 								local_x[k][row>>3] = val;
 							}
 						}
+					}
+					if(!fifo_prev_pe.empty()){
+						fifo_prev_pe.read(nullptr);
 						j++;
 					}
 				}
 			} else {
-		load_node_2:
-				for(int j = 0, w_idx = 0; j < N_node || w_idx < N_node;){ // pass to its neighbor peg
+				for(int j = 0; j < N_node;){
 					#pragma HLS pipeline II=1
 					#pragma HLS dependence variable=local_x_tmp false
-					if(w_idx < N_node){
-						fifo_next_pe.write(cache_struct[w_idx]);
-						w_idx++;
-					}
-					if((j < w_idx) & (!fifo_prev_pe.empty())){
+					if(!fifo_prev_pe.empty()){
 						MultDVec node_block; fifo_prev_pe.try_read(node_block);
-						cache_struct[j] = node_block;
+						fifo_next_pe.write(node_block);
 
 						for(int k = 0; k < 8; k++){
 							#pragma HLS unroll
@@ -735,7 +729,7 @@ split:
 					dep_graph_inst_edge.write(N_node);
 					dep_graph_inst_edge.write(N_edge);
 
-					if(edge_sec == 0){
+					if(edge_sec == pe_i){
 						for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
 						#pragma HLS pipeline II=1 style=frp
 							if((i_req < N_node) & !dep_graph_ch.read_addr.full()){
