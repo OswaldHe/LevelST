@@ -826,20 +826,20 @@ void read_all_ptr(
 		}
 	}
 
-void X_Merger(tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
-	bool read_ok = true;
-	for(int w_idx = 0;;){
+void X_Merger(tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostreams<float_v16, NUM_CH>& x_out){
+	for(;;){
+		#pragma HLS loop_tripcount min=1 max=1000000
 		#pragma HLS pipeline II=1
-
-		float_v16 bank[NUM_CH];
-		#pragma HLS array_partition variable=bank complete
 		
 		bool flag_nop = false;
 		for(int i = 0; i < NUM_CH; i++){
 			#pragma HLS unroll
 			flag_nop |= x_in[i].empty();
 		}
-		if((!flag_nop) && read_ok){
+		if(!flag_nop){
+			float_v16 bank[NUM_CH];
+			#pragma HLS array_partition variable=bank complete
+
 			for(int i = 0; i < NUM_CH; i++){
 				#pragma HLS unroll
 				float_v16 tmp_x; x_in[i].try_read(tmp_x);
@@ -848,15 +848,23 @@ void X_Merger(tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>&
 					bank[(i + j * NUM_CH)/16][(i + j * NUM_CH)%16] = tmp_x[j];
 				}
 			}
-			read_ok = false;
-		}
-		if(!read_ok){
-			x_out.write(bank[w_idx]);
-			w_idx++;
-			if(w_idx == NUM_CH){
-				w_idx = 0;
-				read_ok = true;
+			
+			for(int i = 0; i < NUM_CH; i++){
+				#pragma HLS unroll
+				x_out[i].write(bank[i]);
 			}
+		}
+	}
+}
+
+void X_serial(tapa::istreams<float_v16, NUM_CH>& x_in, tapa::ostream<float_v16>& x_out){
+	for(int w_idx = 0;;){
+		#pragma HLS pipeline II=1
+		if(!x_in[w_idx].empty() & !x_out.full()){
+			float_v16 tmp; x_in[w_idx].try_read(tmp);
+			x_out.try_write(tmp);
+			w_idx++;
+			if(w_idx == NUM_CH) w_idx = 0;
 		}
 	}
 }
@@ -965,7 +973,8 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 			){
 
 	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_val("n_val");
-	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_q("x_pipe");
+	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_q("x_q");
+	tapa::streams<float_v16, NUM_CH, 8> x_q_2("x_q_2");
 	tapa::stream<bool, FIFO_DEPTH> fin_write("fin_write");
 	tapa::stream<int, FIFO_DEPTH> block_id("block_id");
 	tapa::streams<float_v16, NUM_CH+2, FIFO_DEPTH> req_x("req_x");
@@ -1030,6 +1039,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::detach, NUM_CH>(solve_edge, tapa::seq(), dep_graph_ch_edge, dep_graph_inst_edge, fifo_node_to_edge, fifo_edge_to_node, fifo_broadcast, fifo_broadcast, x_q, N_sub_3)
 		.invoke<tapa::detach>(forward, fifo_broadcast, fifo_apt)
 		// .invoke<tapa::detach>(black_hole_dvec, fifo_broadcast)
-		.invoke<tapa::detach>(X_Merger, x_q, x_next)
+		.invoke<tapa::detach>(X_Merger, x_q, x_q_2)
+		.invoke<tapa::detach>(X_serial, x_q_2, x_next)
 		.invoke<tapa::join>(write_x, x_next, fin_write, x, N);
 }
