@@ -711,7 +711,7 @@ layer:
 				
 split:
 				for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
-				#pragma HLS pipeline II=1 style=frp
+				#pragma HLS pipeline II=1
 					if((i_req < N_node) & !dep_graph_ch.read_addr.full()){
 							dep_graph_ch.read_addr.try_write(i_req+offset);
 							++i_req;
@@ -726,7 +726,7 @@ split:
 				offset+=N_node;
 
 				for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
-				#pragma HLS pipeline II=1 style=frp
+				#pragma HLS pipeline II=1 
 					if((i_req < N_edge) & !dep_graph_ch.read_addr.full()){
 						dep_graph_ch.read_addr.try_write(i_req+offset);
 						++i_req;
@@ -871,9 +871,7 @@ void fill_zero_dvec(tapa::ostream<MultDVec>& fifo_out){
 void read_x(const int NUM_ITE, 
 	tapa::istream<int>& fifo_inst_in, 
 	tapa::ostream<int>& fifo_inst_out, 
-	tapa::ostream<int>& block_id, 
-	tapa::istream<float_v16>& fifo_x_in, 
-	tapa::ostream<float_v16>& fifo_x_out){
+	tapa::ostream<int>& block_id){
 
 	for(int round = 0; round < NUM_ITE; round++){
 		for(int ite = 0; ite < (round*NUM_CH); ite++){
@@ -882,22 +880,12 @@ void read_x(const int NUM_ITE,
 
 			if(need == 1){
 				block_id.write(ite);
-				for(int i = 0; i < WINDOW_SIZE_div_16;){
-					#pragma HLS pipeline II=1
-					if(!fifo_x_in.empty()){
-						float_v16 x_val; fifo_x_in.try_read(x_val);
-						fifo_x_out.write(x_val);
-						i++;
-					}
-				}
 			}
 		}
 	}
 }
 
-void request_X(tapa::async_mmap<float_v16>& mmap, tapa::istream<int>& block_id, tapa::ostream<float_v16>& fifo_x_out, tapa::istream<bool>& fin_write){
-
-	int block = 0;
+void write_progress(tapa::istream<bool>& fin_write, tapa::istream<int>& block_id, tapa::ostream<int>& block_fin){
 	int block_done = 0;
 
 	for(;;){
@@ -910,26 +898,39 @@ void request_X(tapa::async_mmap<float_v16>& mmap, tapa::istream<int>& block_id, 
 				block_done = 0;
 			}
 		}
-scan:
+
 		if(!block_id.empty()){
-			block = block_id.peek(nullptr);
-			if(block_done <= block) continue;
-			else {
+			int block = block_id.peek(nullptr);
+			if(block_done > block){
 				block_id.read(nullptr);
+				block_fin.write(block);
+			} 
+		}
+	}
+}
+
+void request_X(tapa::async_mmap<float_v16>& mmap, tapa::ostream<float_v16>& fifo_x_out, tapa::istream<int>& block_fin){
+
+	for(;;){
+#pragma HLS loop_flatten off
+
+		if(!block_fin.empty()){
+			int block;
+			block_fin.try_read(block);
+		
 load_x_to_cache:
-				for(int i_req = block * WINDOW_SIZE_div_16, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
+			for(int i_req = block * WINDOW_SIZE_div_16, i_resp = 0; i_resp < WINDOW_SIZE_div_16;){
 #pragma HLS pipeline II=1
 #pragma HLS loop_tripcount min=0 max=32
-					if((i_req < (block+1) * WINDOW_SIZE_div_16) & !mmap.read_addr.full()){
-						mmap.read_addr.try_write(i_req);
-						++i_req;
-					}
-					if(!mmap.read_data.empty() & !fifo_x_out.full()){
-						float_v16 tmp;
-						mmap.read_data.try_read(tmp);
-						fifo_x_out.try_write(tmp);
-						++i_resp;
-					}
+				if((i_req < (block+1) * WINDOW_SIZE_div_16) & !mmap.read_addr.full()){
+					mmap.read_addr.try_write(i_req);
+					++i_req;
+				}
+				if(!mmap.read_data.empty() & !fifo_x_out.full()){
+					float_v16 tmp;
+					mmap.read_data.try_read(tmp);
+					fifo_x_out.try_write(tmp);
+					++i_resp;
 				}
 			}
 		}
@@ -952,7 +953,8 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_q("x_pipe");
 	tapa::stream<bool, FIFO_DEPTH> fin_write("fin_write");
 	tapa::stream<int, FIFO_DEPTH> block_id("block_id");
-	tapa::streams<float_v16, NUM_CH+2, FIFO_DEPTH> req_x("req_x");
+	tapa::stream<int, FIFO_DEPTH> block_fin("block_fin");
+	tapa::streams<float_v16, NUM_CH+1, FIFO_DEPTH> req_x("req_x");
 
 	tapa::stream<int, FIFO_DEPTH> merge_inst_q("merge_inst_q");
 	// tapa::streams<ap_uint<512>, NUM_CH> dep_graph_ch_q("dep_graph_ch_q");
@@ -987,9 +989,10 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 	tapa::task()
 		.invoke<tapa::join>(read_len, N, NUM_ITE, N_val)
 		// .invoke<tapa::join>(fill_zero, x_q)
-		.invoke<tapa::detach>(request_X, x, block_id, req_x, fin_write)
+		.invoke<tapa::detach>(request_X, x, req_x, block_fin)
+		.invoke<tapa::detach>(write_progress, fin_write, block_id, block_fin)
 		.invoke<tapa::join>(read_all_ptr, if_need, fifo_need)
-		.invoke<tapa::join>(read_x, NUM_ITE, fifo_need, fifo_need, block_id, req_x, req_x)
+		.invoke<tapa::join>(read_x, NUM_ITE, fifo_need, fifo_need, block_id)
 		.invoke<tapa::join>(read_f, N, f, f_q)
 		// .invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
 		.invoke<tapa::join>(read_all_ptr, merge_inst_ptr, merge_inst_q)
