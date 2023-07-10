@@ -428,18 +428,17 @@ for(;;){
 #pragma HLS bind_storage variable=local_x type=RAM_2P impl=URAM
 #pragma HLS array_partition complete variable=local_x dim=1
 
-	float local_x_tmp[4][8][WINDOW_SIZE_div_8];
+compute:
+    for(int i = 0; i < N_layer-1; i++){
+		const int N_node = dep_graph_ptr.read();
+		const int N_edge = dep_graph_ptr.read();
+
+		for(int level = pe_i; level >= 0; level--){
+
+		float local_x_tmp[4][8][WINDOW_SIZE_div_8];
 #pragma HLS bind_storage variable=local_x_tmp latency=2
 #pragma HLS array_partition complete variable=local_x_tmp dim=1
 #pragma HLS array_partition complete variable=local_x_tmp dim=2
-// #pragma HLS array_partition cyclic variable=local_x_tmp factor=2 dim=3	
-
-compute:
-    for(int i = 0; i < N_layer; i++){
-
-		for(int level = pe_i; level >= 0; level--){
-			const int N_node = dep_graph_ptr.read();
-			const int N_edge = dep_graph_ptr.read();
 
 	load_node:
 			if(level == pe_i){
@@ -514,6 +513,28 @@ compute:
 					j++;
 				}
 			}
+		}
+	}
+
+	// last layer has N_edge = 0
+
+	const int N_node = dep_graph_ptr.read();
+	for(int j = 0; j < N_node;){
+		#pragma HLS pipeline II=1
+		#pragma HLS dependence variable=local_x false
+
+		if(!fifo_node_to_edge.empty()){
+			MultDVec node_block; fifo_node_to_edge.try_read(node_block);
+
+			for(int k = 0; k < 8; k++){
+				#pragma HLS unroll
+				auto row = node_block.row[k];
+				auto val = node_block.axv[k];
+				if(row[14] == 0){
+					local_x[k][row>>3] = val;
+				}
+			}
+			j++;
 		}
 	}
 
@@ -696,7 +717,7 @@ round:
 			dep_graph_inst_edge.write(N_layer);
 
 layer:
-			for(int i = 0; i < N_layer; i++){
+			for(int i = 0; i < N_layer-1; i++){
 				const int N_node = dep_graph_ptr.read();
 				const int N_edge = dep_graph_ptr.read();
 				const int N_edge_total = N_edge * (pe_i + 1);
@@ -725,27 +746,10 @@ split:
 				}
 				offset+=N_node;
 
-				for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
-				#pragma HLS pipeline II=1 
-					if((i_req < N_edge) & !dep_graph_ch.read_addr.full()){
-						dep_graph_ch.read_addr.try_write(i_req+offset);
-						++i_req;
-					}
-					if(!dep_graph_ch.read_data.empty()){
-						ap_uint<512> tmp;
-						dep_graph_ch.read_data.try_read(tmp);
-						dep_graph_edge.write(tmp);
-						++i_resp;
-					}
-				}
-				offset+=N_edge;
+				for(int edge_sec = 0; edge_sec <= pe_i; edge_sec++){
 
-				for(int edge_sec = 0; edge_sec < pe_i; edge_sec++){
-
-					dep_graph_inst_edge.write(N_node);
-					dep_graph_inst_edge.write(N_edge);
 					for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
-					#pragma HLS pipeline II=1 style=frp
+					#pragma HLS pipeline II=1 
 						if((i_req < N_edge) & !dep_graph_ch.read_addr.full()){
 								dep_graph_ch.read_addr.try_write(i_req+offset);
 								++i_req;
@@ -760,6 +764,33 @@ split:
 					offset+=N_edge;
 				}
 			}
+
+			const int N_node = dep_graph_ptr.read();
+			const int N_edge = dep_graph_ptr.read();
+			const int N_edge_total = N_edge * (pe_i + 1);
+
+			dep_graph_ptr_out.write(N_node);
+			dep_graph_ptr_out.write(N_edge);
+
+			dep_graph_inst_node.write(N_node);
+			dep_graph_inst_node.write(N_edge_total);
+			dep_graph_inst_edge.write(N_node);
+
+			for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
+			#pragma HLS pipeline II=1 
+				if((i_req < N_node) & !dep_graph_ch.read_addr.full()){
+						dep_graph_ch.read_addr.try_write(i_req+offset);
+						++i_req;
+				}
+				if(!dep_graph_ch.read_data.empty()){
+					ap_uint<512> tmp;
+					dep_graph_ch.read_data.try_read(tmp);
+					dep_graph_node.write(tmp);
+					++i_resp;
+				}
+			}
+			offset+=N_node;
+
 		}
 	}
 
