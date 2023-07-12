@@ -309,6 +309,7 @@ read_spmv_and_subtract:
 	}
 
 void solve_node(
+	const int pe_i,
 	tapa::istream<ap_uint<512>>& dep_graph_ch,
 	tapa::istream<int>& dep_graph_ptr,
 	tapa::istream<float_v16>& y_in,
@@ -375,7 +376,7 @@ compute_node:
 		}
 
 load_edge:
-		for(int j = 0; j < N_edge;){
+		for(int j = 0; j < N_edge * (pe_i + 1);){
 			#pragma HLS pipeline II=1
 			#pragma HLS dependence variable=local_y distance=8 true
 			if(!fifo_edge_to_node.empty()){
@@ -720,13 +721,12 @@ layer:
 			for(int i = 0; i < N_layer-1; i++){
 				const int N_node = dep_graph_ptr.read();
 				const int N_edge = dep_graph_ptr.read();
-				const int N_edge_total = N_edge * (pe_i + 1);
 
 				dep_graph_ptr_out.write(N_node);
 				dep_graph_ptr_out.write(N_edge);
 
 				dep_graph_inst_node.write(N_node);
-				dep_graph_inst_node.write(N_edge_total);
+				dep_graph_inst_node.write(N_edge);
 				dep_graph_inst_edge.write(N_node);
 				dep_graph_inst_edge.write(N_edge);
 				
@@ -767,13 +767,12 @@ split:
 
 			const int N_node = dep_graph_ptr.read();
 			const int N_edge = dep_graph_ptr.read();
-			const int N_edge_total = N_edge * (pe_i + 1);
 
 			dep_graph_ptr_out.write(N_node);
 			dep_graph_ptr_out.write(N_edge);
 
 			dep_graph_inst_node.write(N_node);
-			dep_graph_inst_node.write(N_edge_total);
+			dep_graph_inst_node.write(N_edge);
 			dep_graph_inst_edge.write(N_node);
 
 			for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
@@ -834,9 +833,7 @@ void read_all_ptr(
 					++i_req;
 			}
 			if(!merge_inst_ptr.read_data.empty()){
-				int tmp;
-				merge_inst_ptr.read_data.try_read(tmp);
-				N = tmp;
+				merge_inst_ptr.read_data.try_read(N);
 				++i_resp;
 			}
 		}
@@ -878,7 +875,6 @@ write_x:
 void read_len( const int N, const int NUM_ITE,
 	tapa::ostreams<int, NUM_CH>& N_val){
 	for(int i = 0; i < NUM_ITE; i++){
-#pragma HLS loop_flatten off
 		for(int j = 0; j < NUM_CH; j++){
 			int remain = N - i*WINDOW_LARGE_SIZE - j*WINDOW_SIZE;
 			int len = WINDOW_SIZE;
@@ -920,7 +916,8 @@ void write_progress(tapa::istream<bool>& fin_write, tapa::istream<int>& block_id
 	int block_done = 0;
 
 	for(;;){
-#pragma HLS loop_flatten off
+#pragma HLS pipeline II=1
+
 		if(!fin_write.empty()){
 			bool last = fin_write.read(nullptr);
 			if(last){
@@ -930,11 +927,11 @@ void write_progress(tapa::istream<bool>& fin_write, tapa::istream<int>& block_id
 			}
 		}
 
-		if(!block_id.empty()){
+		if(!block_id.empty() & !block_fin.full()){
 			int block = block_id.peek(nullptr);
 			if(block_done > block){
 				block_id.read(nullptr);
-				block_fin.write(block);
+				block_fin.try_write(block);
 			} 
 		}
 	}
@@ -1041,7 +1038,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
 		.invoke<tapa::join, NUM_CH>(PEG_YVec, NUM_ITE, spmv_inst_2, fifo_aXVec, y, N_val, N_sub_1)
 		.invoke<tapa::detach, NUM_CH>(Yvec_minus_f, f_q, y, y_update, N_sub_1, N_sub_2)
 		// .invoke<tapa::detach, NUM_CH>(solve, dep_graph_ch_q, dep_graph_inst, y_update, x_next, N_sub_2, N_sub_3)
-		.invoke<tapa::detach, NUM_CH>(solve_node, dep_graph_ch_node, dep_graph_inst, y_update, fifo_node_to_edge, fifo_edge_to_node, N_sub_2, N_sub_3)
+		.invoke<tapa::detach, NUM_CH>(solve_node, tapa::seq(), dep_graph_ch_node, dep_graph_inst, y_update, fifo_node_to_edge, fifo_edge_to_node, N_sub_2, N_sub_3)
 		.invoke<tapa::join>(fill_zero_dvec, fifo_broadcast)
 		.invoke<tapa::detach, NUM_CH>(solve_edge, tapa::seq(), dep_graph_ch_edge, dep_graph_inst_edge, fifo_node_to_edge, fifo_edge_to_node, fifo_broadcast, fifo_broadcast, x_q, N_sub_3)
 		.invoke<tapa::detach>(black_hole_dvec, fifo_broadcast)
