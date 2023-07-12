@@ -611,7 +611,7 @@ int main(int argc, char* argv[]){
     vector<int> CSRColIndex;
     vector<float> CSRVal;
 
-	read_suitsparse_matrix_FP64("lp1.mtx",
+	read_suitsparse_matrix_FP64("lp1_alt.mtx",
                            CSRRowPtr,
                            CSRColIndex,
                            CSRVal,
