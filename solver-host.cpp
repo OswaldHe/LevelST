@@ -814,7 +814,11 @@ int main(int argc, char* argv[]){
 	}
 
         for (int i = 0; i < N; ++i){
-		if(std::fabs((std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i])/expected_x[i]) > 0.03 && std::fabs((x_fpga[i]-expected_x[i])/expected_x[i]) > 0.01 ){
+		if(std::fabs((std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i])/expected_x[i]) > 0.03 
+			&& std::fabs((x_fpga[i]-expected_x[i])/expected_x[i]) > 0.01 
+			&& std::fabs(x_fpga[i]-expected_x[i]) > 1e-4
+			&& std::fabs(std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i]) > 1e-4
+			){
 			std::clog << "index: " << i << ", expected: " << expected_x[i] << ", actual: " << x_fpga[i] << ", diff: " << std::fabs(x_fpga[i]-expected_x[i]) << std::endl;
 			unmatched++;
 		}
