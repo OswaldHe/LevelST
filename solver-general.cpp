@@ -29,6 +29,8 @@ struct MultDVec {
 	float_v8 axv;
 };
 
+//TODO: both spmv and dep_graph take data in the same format (row 16 + col 16 + val 32)
+
 template <typename data_t>
 inline void bh(tapa::istream<data_t> & q) {
 #pragma HLS inline
@@ -120,6 +122,7 @@ void read_f(const int N, tapa::async_mmap<float_v16>& mmap, tapa::ostreams<float
 	}
 }
 
+// TODO: take x from both request_X and other PEG
 void PEG_Xvec(const int NUM_ITE,
 	tapa::istream<int>& fifo_inst_in, tapa::ostream<int>& fifo_inst_out,
 	tapa::istream<ap_uint<512>>& spmv_A, // 16-bit row + 16-bit col + 32-bit float
@@ -136,6 +139,7 @@ round:
 load_x:
 			for(int ite = 0; ite < (round*NUM_CH); ite++){
 
+// TODO: share local_x, use in spmv and dep_graph (two circuits)
 				float local_x[4][WINDOW_SIZE];
 #pragma HLS bind_storage variable=local_x latency=2
 #pragma HLS array_partition variable=local_x complete dim=1
@@ -402,6 +406,7 @@ load_edge:
 
 	}
 
+// TODO: remove, because it's the same as PEG_X + PEG_Y
 void solve_edge(
 		int pe_i,
 		tapa::istream<ap_uint<512>>& dep_graph_ch,
@@ -556,110 +561,7 @@ write_x:
 
 		}
 
-// void solve(tapa::istream<ap_uint<512>>& dep_graph_ch,
-// 		tapa::istream<int>& dep_graph_ptr,
-// 		tapa::istream<float_v16>& y_in,
-// 		tapa::ostream<float_v16>& x_out, 
-// 		tapa::istream<int>& N_in,
-// 		tapa::ostream<int>& N_out){
-
-// for(;;){
-// #pragma HLS loop_flatten off
-// 	const int N = N_in.read();
-// 	N_out.write(N);
-// 	const int N_layer = dep_graph_ptr.read();
-// 	const int num_ite = (N + 15) / 16;
-
-// 	float local_x[8][8][WINDOW_SIZE_div_8];
-// 	float local_y[8][WINDOW_SIZE_div_8];
-
-// #pragma HLS array_partition complete variable=local_x dim=1
-// #pragma HLS array_partition complete variable=local_x dim=2
-// #pragma HLS array_partition complete variable=local_y dim=1
-
-// read_y:
-// 	for(int i = 0; i < num_ite;){
-// #pragma HLS pipeline II=1
-// 		if(!y_in.empty()){
-// 			float_v16 tmp_f; y_in.try_read(tmp_f);
-// 			for(int j = 0; j < 16; j++){
-// 				#pragma HLS unroll
-// 				local_y[j%8][(i << 1) + (j >> 3)] = tmp_f[j];
-// 			}
-// 			i++;
-// 		}
-// 	}
-
-// compute:
-//     for(int i = 0; i < N_layer; i++){
-// 		const int N_node = dep_graph_ptr.read();
-// 		const int N_edge = dep_graph_ptr.read();
-
-// compute_node:
-// 		for(int j = 0; j < N_node;){
-// 			#pragma HLS pipeline II=1
-// 			#pragma HLS dependence variable=local_x false
-// 			#pragma HLS dependence variable=local_y false
-// 			if(!dep_graph_ch.empty()){
-// 				ap_uint<512> dep_block; dep_graph_ch.try_read(dep_block);
-
-// 				for(int k = 0; k < 8; k++){
-// 					#pragma HLS unroll
-// 					ap_uint<64> a = dep_block(64*k + 63, 64*k);
-// 					ap_uint<2> opcode = a(63,62);
-// 					ap_uint<15> row = a(61,47);
-// 					ap_uint<32> val = a(31,0);
-// 					float val_f = tapa::bit_cast<float>(val);
-// 					if((opcode | (int) 0) == 1){
-// 						float ans = local_y[k][(row >> 3)] * val_f;
-// 						for(int l = 0; l < 8; l++){
-// 							local_x[l][k][(row >> 3)] = ans;
-// 						}
-// 					}
-// 				}
-// 				j++;
-// 			}
-// 		}
-
-// compute_edge:
-// 		for(int j = 0; j < N_edge;){
-// 			#pragma HLS pipeline II=1
-// 			#pragma HLS dependence true variable=local_y distance=6
-// 			if(!dep_graph_ch.empty()){
-// 				ap_uint<512> dep_block; dep_graph_ch.try_read(dep_block);
-
-// 				for(int k = 0; k < 8; k++){
-// 					#pragma HLS unroll
-// 					ap_uint<64> a = dep_block(64*k + 63, 64*k);
-// 					ap_uint<2> opcode = a(63,62);
-// 					ap_uint<15> row = a(61,47);
-// 					ap_uint<15> col = a(46,32);
-// 					ap_uint<32> val = a(31,0);
-// 					float val_f = tapa::bit_cast<float>(val);
-// 					if((opcode | (int) 0) == 0){
-// 						local_y[k][(row >> 3)] -= (local_x[k][col%8][(col >> 3)] * val_f);
-// 					}
-// 				}
-// 				j++;
-// 			}
-// 		}
-// 	}
-
-
-// write_x:
-// 	for(int i = 0; i < num_ite; i++){
-// #pragma HLS loop_tripcount min=1 max=64
-// #pragma HLS pipeline II=1
-// 		float_v16 tmp_x;
-// 		for(int j = 0; j < 16; j++){
-// 		#pragma HLS unroll
-// 			tmp_x[j] = local_x[j/2][j%8][(i << 1)+(j >> 3)];
-// 		}
-// 		x_out.write(tmp_x);
-// 	}
-// }
-// }
-
+//TODO: merge two read modules into one
 void read_A_and_split(const int NUM_ITE,
 	tapa::async_mmap<ap_uint<512>>& csr_edge_list_ch,
 	tapa::istream<int>& csr_edge_list_ptr,
@@ -793,6 +695,7 @@ split:
 		}
 	}
 
+// TODO: remove this since spmv and dep_graph come from the same port
 void split_ptr_inst(const int NUM_ITE,
 	tapa::istream<int>& merge_inst_q,
 	tapa::ostream<int>& dep_graph_ptr_q,
