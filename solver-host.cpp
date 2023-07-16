@@ -19,7 +19,7 @@ using float_v16 = tapa::vec_t<float, 16>;
 using int_v16 = tapa::vec_t<int, 16>;
 using std::vector;
 
-constexpr int NUM_CH = 10;
+constexpr int NUM_CH = 16;
 constexpr int WINDOW_SIZE = 8192;
 constexpr int WINDOW_SIZE_div_2 = 8192;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE*NUM_CH;
@@ -29,17 +29,13 @@ int MULT_SIZE = 1;
 template <typename T>
 using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
 
-void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> csr_edge_list_ch,
-			// tapa::mmaps<int, NUM_CH> csr_edge_list_ptr,
-			tapa::mmaps<ap_uint<512>, NUM_CH> dep_graph_ch,
-			// tapa::mmaps<int, NUM_CH> dep_graph_ptr,
+void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 			tapa::mmap<int> merge_inst_ptr,
 			tapa::mmap<float_v16> f, 
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N,
 			const int NUM_ITE
-			// tapa::mmap<int> K_csc
 			);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
@@ -341,14 +337,12 @@ void generate_dependency_graph_for_pes(
 				int root = roots.front();
 				for(auto e : dep_map[root]){
 					ap_uint<64> a;
-					a(61,47) = (ap_uint<15>)((e.row%WINDOW_SIZE) & 0x7FFF);
-					a(46,32) = (ap_uint<15>)((e.col%WINDOW_SIZE) & 0x7FFF);
+					a(63,48) = (ap_uint<16>)((e.row%WINDOW_SIZE) & 0xFFFF);
+					a(47,32) = (ap_uint<16>)((e.col%WINDOW_SIZE) & 0xFFFF);
 					a(31,0) = tapa::bit_cast<ap_uint<32>>(e.attr);
 					if(e.row == e.col){
-						a(63,62) = (ap_uint<2>)(1);
 						nodes_pe[e.row/WINDOW_SIZE].push_back(a);
 					}else{
-						a(63,62) = (ap_uint<2>)(0);
 						edges_pe[(e.row/WINDOW_SIZE)*NUM_CH+(e.col/WINDOW_SIZE)].push_back(a);
 						parents[e.row]--;
 						if(parents[e.row] == 0) {
@@ -392,15 +386,14 @@ void generate_dependency_graph_for_pes(
 				vector<ap_uint<64>> packet(8);
 				for(int n = 0; n < 8; n++){
 					ap_uint<64> a = 0;
-					a(63,62) = (ap_uint<2>)(2);
-					a(61,47) = 0x7FFF;
+					a(63, 48) = (ap_uint<16>) 0xFFFF;
 					a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
 					packet[n] = a;
 				}
 				for(int n = 0; n < rem_node_num; n++){
 					if(!used_node[n]){
 						auto nd = nodes[n];
-						int row_i = (nd(61,47) | (int) 0);
+						int row_i = (nd(63,48) | (int) 0);
 						if(row.find(row_i % 8) == row.end()){
 							row.insert(row_i % 8);
 							packet[row_i % 8] = nd;
@@ -436,14 +429,13 @@ void generate_dependency_graph_for_pes(
 					row_raw[next_slot].clear();
 					for(int n = 0; n < 8; n++){
 						ap_uint<64> a = 0;
-						a(63,62) = (ap_uint<2>)(2);
-						a(61,47) = 0x7FFF;
+						a(63, 48) = (ap_uint<16>) 0xFFFF;
 						packet[n] = a;
 					}
 					for(int n = 0; n < rem_edge_num; n++){
 						if(!used_edge[n]){
 							auto e = edge_list[n];
-							int row_i = (e(61,47) | (int) 0);
+							int row_i = (e(63,48) | (int) 0);
 							// int col_i = (e(46,32) | (int) 0);
 							bool found = false;
 							for(int m = 0; m < 8; m++){
@@ -508,8 +500,7 @@ void generate_dependency_graph_for_pes(
 				for(int b = 0; b < maxNode - node_count_pe[pe_i]; b++){
 					for(int n = 0; n < 8; n++){
 						ap_uint<64> a = 0;
-						a(63,62) = (ap_uint<2>)(2);
-						a(61,47) = 0x7FFF;
+						a(63, 48) = (ap_uint<16>) 0xFFFF;
 						a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
 						dep_graph_ch[pe_i].push_back(a);
 					}
@@ -522,8 +513,7 @@ void generate_dependency_graph_for_pes(
 					for(int l = 0; l < maxEdge - edge_count_pe[pe_i][b]; l++){
 						for(int n = 0; n < 8; n++){
 							ap_uint<64> a = 0;
-							a(63,62) = (ap_uint<2>)(2);
-							a(61,47) = 0x7FFF;
+							a(63, 48) = (ap_uint<16>) 0xFFFF;
 							dep_graph_ch[pe_i].push_back(a);
 						}
 					}
@@ -577,6 +567,52 @@ void merge_ptr(int N,
 	merge_inst_ptr.insert(merge_inst_ptr.begin(), size);
 }
 
+void merge_data(
+	int N,
+	aligned_vector<int>& dep_graph_ptr,
+	aligned_vector<int>& edge_list_ptr,
+	vector<aligned_vector<ap_uint<64>>>& dep_graph_ch,
+	vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
+	vector<aligned_vector<ap_uint<64>>>& comp_packet_ch
+){
+	int bound = (N%WINDOW_LARGE_SIZE == 0)?N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
+	for(int ch = 0; ch < NUM_CH; ch++){
+		int edge_list_offset = 0;
+		int dep_graph_offset = 0;
+		int edge_list_ch_offset = 0;
+		int dep_graph_ch_offset = 0;
+
+		for(int round = 0; round < bound; round++){
+			for(int i = 0; i < (NUM_CH*round)*MULT_SIZE; i++){
+				int len = edge_list_ptr[i+edge_list_offset];
+				for(int j = 0; j < len; j++){
+					comp_packet_ch[ch].push_back(edge_list_ch[ch][j+edge_list_ch_offset]);
+				}
+				edge_list_ch_offset+=len;
+			}
+			edge_list_offset += (NUM_CH*round)*MULT_SIZE;
+			int N_level = dep_graph_ptr[dep_graph_offset++];
+			for(int i = 0; i < N_level; i++){
+				int N_node = dep_graph_ptr[i*2 + dep_graph_offset];
+				int N_edge = dep_graph_ptr[i*2 + 1 + dep_graph_offset];
+				for(int j = 0; j < N_node; j++){
+					for(int k = 0; k < 8; k++){
+						comp_packet_ch[ch].push_back(dep_graph_ch[ch][(j*8 + k) + dep_graph_ch_offset]);
+					}
+				}
+				dep_graph_ch_offset+=N_node*8;
+				for(int j = 0; j < N_edge * (ch+1); j++){
+					for(int k = 0; k < 8; k++){
+						comp_packet_ch[ch].push_back(dep_graph_ch[ch][(j*8 + k) + dep_graph_ch_offset]);
+					}
+				}
+				dep_graph_ch_offset+=(N_edge)*(ch+1) * 8;
+			}
+			dep_graph_offset+=N_level*2;
+		}
+	}
+}
+
 void readCSRMatrix(std::string filename, aligned_vector<int>& csr_row_ptr, aligned_vector<int>& csr_col_ind, aligned_vector<float>& csr_val){
 	std::ifstream file(filename);
 	std::string line;
@@ -611,7 +647,7 @@ int main(int argc, char* argv[]){
     vector<int> CSRColIndex;
     vector<float> CSRVal;
 
-	read_suitsparse_matrix_FP64("com-Amazon_trig.mtx",
+	read_suitsparse_matrix_FP64("lp1.mtx",
                            CSRRowPtr,
                            CSRColIndex,
                            CSRVal,
@@ -713,6 +749,7 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<int>> csc_col_ptr_fpga(NUM_CH);
 	vector<aligned_vector<int>> csc_row_ind_fpga(NUM_CH);
 	vector<aligned_vector<ap_uint<64>>> dep_graph_ch(NUM_CH);
+	vector<aligned_vector<ap_uint<64>>> comp_packet_ch(NUM_CH);
 	aligned_vector<int> dep_graph_ptr;
 	aligned_vector<int> merge_inst_ptr;
 	aligned_vector<int> if_need;
@@ -724,6 +761,7 @@ int main(int argc, char* argv[]){
 	process_spmv_ptr(edge_list_ch, edge_list_ptr, edge_list_ch_mod, edge_list_ptr_mod, maxLenCounter);
 	generate_dependency_graph_for_pes(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
 	merge_ptr(N, dep_graph_ptr, edge_list_ptr_mod, merge_inst_ptr);
+	merge_data(N, dep_graph_ptr, edge_list_ptr_mod, dep_graph_ch, edge_list_ch_mod, comp_packet_ch);
 
 	int need_count = 0;
 	for(int i = 1; i < if_need.size(); i++){
@@ -759,12 +797,7 @@ int main(int argc, char* argv[]){
 	int NUM_ITE = (N%WINDOW_LARGE_SIZE == 0)?N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
 
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
-                        tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(edge_list_ch_mod).reinterpret<ap_uint<512>>(),
-						// tapa::read_only_mmaps<int, NUM_CH>(edge_list_ptr),
-						tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(dep_graph_ch).reinterpret<ap_uint<512>>(),
-						// tapa::read_only_mmaps<int, NUM_CH>(dep_graph_ptr),
-						// tapa::read_only_mmaps<int, NUM_CH>(csc_col_ptr_fpga),
-						// tapa::read_only_mmaps<int, NUM_CH>(csc_row_ind_fpga),
+                        tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(comp_packet_ch).reinterpret<ap_uint<512>>(),
 						tapa::read_only_mmap<int>(merge_inst_ptr),
 						tapa::read_only_mmap<float>(f).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(),
@@ -814,7 +847,7 @@ int main(int argc, char* argv[]){
 	}
 
         for (int i = 0; i < N; ++i){
-		if(std::fabs((std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i])/expected_x[i]) > 0.03 
+		if(std::fabs((std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i])/expected_x[i]) > 0.01 
 			&& std::fabs((x_fpga[i]-expected_x[i])/expected_x[i]) > 0.01 
 			&& std::fabs(x_fpga[i]-expected_x[i]) > 1e-4
 			&& std::fabs(std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i]) > 1e-4
