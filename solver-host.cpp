@@ -816,17 +816,17 @@ int main(int argc, char* argv[]){
 	for(int i = 0; i < N; i++){
 		float test_sum = 0.f;
 		float image = f[i];
-		// if(i == 286374) std::clog << "f: " << f[i] << std::endl;
+		if(i == 131072) std::clog << "f: " << f[i] << std::endl;
 		float num = (i == 0) ? IA[0] : IA[i] - IA[i-1];
 		for(int j = 0; j < num-1; j++){
 			image -= x_fpga[JA[next]]*A[next];
 			test_sum += x_fpga[JA[next]]*A[next];
-			// if(i == 286374) {
-			// 	std::clog << "col:" << JA[next] << ", t1:" << x_fpga[JA[next]] << ", t2:" << A[next] << std::endl; 
-			// }
+			if(i == 131072) {
+				std::clog << "col:" << JA[next] << ", t1:" << x_fpga[JA[next]] << ", t2:" << A[next] << std::endl; 
+			}
 			next++;
 		}
-		// if(i == 286374) std::clog << "row:" << JA[next] << ", val:" << (f[i] - test_sum) * (1/A[next]) << ", cpu: " << image / A[next] << ", diff:" << std::fabs((f[i] - test_sum) * (1/A[next]) - (image / A[next]))<< std::endl;
+		if(i == 131072) std::clog << "row:" << JA[next] << ", val:" << (f[i] - test_sum) * (1/A[next]) << ", cpu: " << image / A[next] << ", diff:" << std::fabs((f[i] - test_sum) * (1/A[next]) - (image / A[next]))<< std::endl;
 		expected_x[JA[next]] = image / A[next];
 		round_off_error[JA[next]] = std::fabs((f[i] - test_sum) * (1/A[next]) - (image / A[next]));
 		//sanity check
