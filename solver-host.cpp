@@ -171,7 +171,7 @@ void generate_edgelist_spmv(
 			int list_size = tmp_edge_list[j].size();
 			int total_size = 0;
 			vector<bool> used_edge(list_size, false);
-			vector<std::set<int>> row_raw(11); // last 11 elements
+			vector<std::set<int>> row_raw(8); // last 11 elements
 			int next_slot = 0;
 			int pack_chunk_count = 0;
 			for(int k = 0; k < list_size;){
@@ -187,7 +187,7 @@ void generate_edgelist_spmv(
 				for(int l = 0; l < list_size; l++){
 					int row_i = (tmp_edge_list[j][l](63, 48) | (int) 0);
 					bool found = false;
-					for(int n = 0; n < 11; n++){
+					for(int n = 0; n < 8; n++){
 						if(row_raw[n].find(row_i) != row_raw[n].end()){
 							found = true;
 							break;
@@ -208,7 +208,7 @@ void generate_edgelist_spmv(
 					edge_list_ch[i%NUM_CH].push_back(packet[l]);
 				}
 				pack_chunk_count++;
-				next_slot = (next_slot + 1) % 11;
+				next_slot = (next_slot + 1) % 8;
 			}
 			// if(total_size != 0) {
 			// 	count_non_zero++;
@@ -554,6 +554,11 @@ void merge_ptr(int N,
 		merge_inst_ptr.push_back((NUM_CH*round)*MULT_SIZE);
 		int N_level = dep_graph_ptr[dep_graph_offset++];
 		merge_inst_ptr.push_back(N_level);
+		int sum = 0;
+		for(int i = 0; i < (NUM_CH*round)*MULT_SIZE; i++){
+			sum +=edge_list_ptr[i+edge_list_offset];
+		}
+		merge_inst_ptr.push_back((sum + 7)/8);
 		for(int i = 0; i < (NUM_CH*round)*MULT_SIZE; i++){
 			merge_inst_ptr.push_back(edge_list_ptr[i+edge_list_offset]);
 		}
@@ -789,8 +794,6 @@ int main(int argc, char* argv[]){
 			}
 		}
 	}
-
-	std::clog << dep_graph_ch[9].size() << std::endl;
 
 	cycle[0] = 0;
 
