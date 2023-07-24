@@ -243,6 +243,108 @@ void generate_edgelist_spmv(
 	if_need.insert(if_need.begin(), size);
 }
 
+void generate_edgelist_spmv_cyclic(
+	int N,
+	const aligned_vector<int>& csr_row_ptr,
+	const aligned_vector<int>& csr_col_ind,
+	const aligned_vector<float>& csr_val,
+	vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
+	vector<aligned_vector<int>>& edge_list_ptr,
+	aligned_vector<int>& if_need
+){
+	int bound = (N % WINDOW_LARGE_SIZE == 0) ? N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
+	for(int i = 0; i < bound; i++){
+		if(i == 0) continue;
+		// distribute to each peg
+		vector<vector<aligned_vector<ap_uint<64>>>> tmp_edge_list(NUM_CH, vector<aligned_vector<ap_uint<64>>>((i+1)*NUM_CH));
+		for(int j = i*WINDOW_LARGE_SIZE; j < (i+1)*WINDOW_LARGE_SIZE && j < N; j++){
+			int start = (j == 0)? 0 : csr_row_ptr[j-1];
+			int end = csr_row_ptr[j];
+			for(int k = start; k < end; k++){
+				int row = (j - i*WINDOW_LARGE_SIZE)/NUM_CH;
+				int ch = (j - i*WINDOW_LARGE_SIZE)%NUM_CH;
+				ap_uint<64> a = 0;
+				a(63, 48) = (ap_uint<16>)(row & 0xFFFF);
+				a(47, 32) = (ap_uint<16>)((csr_col_ind[k]%(WINDOW_SIZE_div_2)) & 0xFFFF);
+				a(31, 0) = tapa::bit_cast<ap_uint<32>>(csr_val[k]);
+				tmp_edge_list[ch][csr_col_ind[k]/WINDOW_SIZE_div_2].push_back(a);
+			}
+		}
+
+		// std::clog << "pe: " << i << std::endl;
+		// int count_non_zero = 0;
+		// int total_cycle = 0;
+		for(int ch = 0; ch < NUM_CH; ch++){
+			for(int j = 0; j < i*NUM_CH; j++){
+				// if(tmp_edge_list[j].size() != 0) std::clog << tmp_edge_list[j].size() << std::endl;
+				int list_size = tmp_edge_list[ch][j].size();
+				int total_size = 0;
+				vector<bool> used_edge(list_size, false);
+				vector<std::set<int>> row_raw(8); // last 11 elements
+				int next_slot = 0;
+				int pack_chunk_count = 0;
+				for(int k = 0; k < list_size;){
+					std::set<int> row;
+					int pack_count = 0;
+					vector<ap_uint<64>> packet(8);
+					row_raw[next_slot].clear();
+					for(int l = 0; l < 8; l++){
+						ap_uint<64> a = 0;
+						a(63, 48) = (ap_uint<16>) 0xFFFF;
+						packet[l] = a;
+					}
+					for(int l = 0; l < list_size; l++){
+						int row_i = (tmp_edge_list[ch][j][l](63, 48) | (int) 0);
+						bool found = false;
+						for(int n = 0; n < 8; n++){
+							if(row_raw[n].find(row_i) != row_raw[n].end()){
+								found = true;
+								break;
+							}
+						}
+						if(!used_edge[l] && row.find(row_i%8) == row.end() && !found){
+							packet[row_i%8] = tmp_edge_list[ch][j][l];
+							row.insert(row_i%8);
+							row_raw[next_slot].insert(row_i);
+							used_edge[l] = true;
+							pack_count++;
+							if(pack_count == 8) break;
+						}
+					}
+					k+= pack_count;
+					total_size += 8;
+					for(int l = 0; l < 8; l++){
+						edge_list_ch[ch].push_back(packet[l]);
+					}
+					pack_chunk_count++;
+					next_slot = (next_slot + 1) % 8;
+				}
+				// if(total_size != 0) {
+				// 	count_non_zero++;
+				// 	total_cycle+=(11+total_size/8);
+				// }
+				edge_list_ptr[ch].push_back(total_size);
+			}
+		}
+		// std::clog << std::max(count_non_zero*WINDOW_SIZE_SPMV, total_cycle) << std::endl;
+	}
+	// for(int i = 0; i < NUM_CH; i++){
+	// 	int size = edge_list_ptr[i].size();
+	// 	edge_list_ptr[i].insert(edge_list_ptr[i].begin(), size);
+	// }
+
+	for(int i = 0; i < edge_list_ptr[0].size(); i++){
+		bool is_non_zero = false;
+		for(int j = 0; j < NUM_CH; j++){
+			if(edge_list_ptr[j][i] != 0) is_non_zero = true;
+		}
+		if(is_non_zero) if_need.push_back(1);
+		else if_need.push_back(0);
+	}
+	int size = if_need.size();
+	if_need.insert(if_need.begin(), size);
+}
+
 void process_spmv_ptr(
 	vector<aligned_vector<ap_uint<64>>>& edge_list_ch,
 	vector<aligned_vector<int>>& edge_list_ptr,
@@ -542,6 +644,276 @@ void generate_dependency_graph_for_pes(
 	// }
 }
 
+void generate_dependency_graph_for_pes_cyclic(
+	int N,
+	const aligned_vector<int>& csr_row_ptr,
+	const aligned_vector<int>& csr_col_ind,
+	const aligned_vector<float>& csr_val,
+	vector<aligned_vector<ap_uint<64>>>& dep_graph_ch,
+	aligned_vector<int>& dep_graph_ptr
+){
+	int bound = (N % WINDOW_LARGE_SIZE == 0) ? N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
+	int total_iter_count = 0;
+	int total_effect_iter_count = 0;
+	for(int i = 0; i < bound; i++){
+		// std::clog << "level: " << i << std::endl;
+		vector<int> csrRowPtr;
+		std::unordered_map<int, vector<edge<float>>> dep_map;
+
+		//extract csr
+		int row_ptr = 0;
+		for(int j = 0; j < WINDOW_LARGE_SIZE && j < N - i * WINDOW_LARGE_SIZE; j++){
+			int start = (i*WINDOW_LARGE_SIZE+j == 0) ? 0:csr_row_ptr[i*WINDOW_LARGE_SIZE+j-1];
+			for(int k = start; k < csr_row_ptr[i*WINDOW_LARGE_SIZE+j]; k++){
+				if(csr_col_ind[k] >= i * WINDOW_LARGE_SIZE){
+					int c = csr_col_ind[k] - i * WINDOW_LARGE_SIZE;
+					float v = csr_val[k];
+					if(c == j) v = 1.0/v;
+					edge<float> e(c, j, v);
+					if(dep_map.find(c) == dep_map.end()){
+						vector<edge<float>> vec;
+						dep_map[c] = vec;
+					}
+					dep_map[c].push_back(e);
+					row_ptr++;
+				}
+			}
+			csrRowPtr.push_back(row_ptr);
+		}
+
+		//generate level-sets
+		vector<int> parents;
+		std::queue<int> roots;
+		int prev = 0;
+		for(int j = 0; j < WINDOW_LARGE_SIZE && j < N - i * WINDOW_LARGE_SIZE; j++){
+			parents.push_back(csrRowPtr[j]-prev-1);
+			if(csrRowPtr[j]-prev-1 == 0) {
+				roots.push(j);
+			}
+			prev = csrRowPtr[j];
+		}
+
+		vector<int> inst;
+		int layer_count = 0;
+
+		while(!roots.empty()){
+			int size = roots.size();
+
+			//TODO: split node/edge list into 8 PEs
+			aligned_vector<vector<ap_uint<64>>> nodes_pe(NUM_CH);
+			aligned_vector<vector<ap_uint<64>>> edges_pe(NUM_CH*NUM_CH);
+			vector<int> node_count_pe(NUM_CH);
+			aligned_vector<vector<int>> edge_count_pe(NUM_CH);
+
+			for(int j = 0; j < size; j++){
+				int root = roots.front();
+				for(auto e : dep_map[root]){
+					ap_uint<64> a;
+					int ch = e.row%NUM_CH;
+					a(63,48) = (ap_uint<16>)((e.row/NUM_CH) & 0xFFFF);
+					a(47,32) = (ap_uint<16>)((e.col/NUM_CH) & 0xFFFF);
+					a(31,0) = tapa::bit_cast<ap_uint<32>>(e.attr);
+					if(e.row == e.col){
+						nodes_pe[ch].push_back(a);
+					}else{
+						edges_pe[ch*NUM_CH+(e.col%NUM_CH)].push_back(a);
+						parents[e.row]--;
+						if(parents[e.row] == 0) {
+							roots.push(e.row);
+						}
+					}
+				}
+				roots.pop();
+			}
+
+
+			int maxNode = 0;
+			int maxEdge = 0;
+			vector<vector<ap_uint<64>>> dep_graph_tmp(NUM_CH);
+
+			int effect_edge = 0;
+
+			//schedule each PEs
+			for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+				int max_effect_edge = 0;
+				int node_count = 0;
+				vector<ap_uint<64>> nodes = nodes_pe[pe_i];
+
+			int rem_node_num = nodes.size();
+			int pushed_node_count = 0;
+			vector<bool> used_node(rem_node_num, false);
+			while(rem_node_num > pushed_node_count){
+				std::set<int> row;
+				vector<ap_uint<64>> packet(8);
+				for(int n = 0; n < 8; n++){
+					ap_uint<64> a = 0;
+					a(63,48) = 0xFFFF;
+					a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
+					packet[n] = a;
+				}
+				for(int n = 0; n < rem_node_num; n++){
+					if(!used_node[n]){
+						auto nd = nodes[n];
+						int row_i = (nd(63,48) | (int) 0);
+						if(row.find(row_i % 8) == row.end()){
+							row.insert(row_i % 8);
+							packet[row_i % 8] = nd;
+							used_node[n] = true;
+							pushed_node_count++;
+						}
+					}
+					if(row.size() == 8) break;
+				}
+				for(int n = 0; n < 8; n++){
+					dep_graph_tmp[pe_i].push_back(packet[n]);
+				}
+				node_count++;
+			}
+			node_count_pe[pe_i] = node_count;
+			if(node_count > maxNode) maxNode = node_count;
+
+			for(int block_id = 0; block_id < NUM_CH; block_id++){
+				int edge_count = 0;
+				vector<ap_uint<64>> edge_list = edges_pe[pe_i*NUM_CH+block_id];
+
+				int rem_edge_num = edge_list.size();
+				int pushed_edge_count = 0;
+				vector<bool> used_edge(rem_edge_num, false);
+				int pack_chunk_count = 0;
+				vector<std::set<int>> row_raw(8); // last 8 elements
+				int next_slot = 0;
+				// std::set<int> row_raw;
+				while(pushed_edge_count < rem_edge_num){
+					std::set<int> row;
+					// std::set<int> col;
+					vector<ap_uint<64>> packet(8);
+					row_raw[next_slot].clear();
+					for(int n = 0; n < 8; n++){
+						ap_uint<64> a = 0;
+						a(63,48) = 0xFFFF;
+						packet[n] = a;
+					}
+					for(int n = 0; n < rem_edge_num; n++){
+						if(!used_edge[n]){
+							auto e = edge_list[n];
+							int row_i = (e(63,48) | (int) 0);
+							// int col_i = (e(46,32) | (int) 0);
+							bool found = false;
+							for(int m = 0; m < 8; m++){
+								if(row_raw[m].find(row_i) != row_raw[m].end()){
+									found = true;
+									break;
+								}
+							}
+							if(row.find(row_i%8) == row.end() 
+							&& !found
+							// && col.find(col_i) == col.end()
+							){
+								row.insert(row_i%8);
+								row_raw[next_slot].insert(row_i);
+								packet[row_i % 8] = e;
+								// col.insert(col_i);
+								// shift_edge_list.push_back(edge_list[n]);
+								used_edge[n] = true;
+							}
+						}
+						if(row.size() == 8) break;
+					}
+					for(int n = 0; n < 8; n++){
+						dep_graph_tmp[pe_i].push_back(packet[n]);
+					}
+					pack_chunk_count++;
+					edge_count++;
+					// if(pack_chunk_count == 18){
+					// 	pack_chunk_count = 0;
+					// 	row_raw.clear();
+					// }
+					next_slot = (next_slot+1)%8;
+					pushed_edge_count += row.size();
+				}
+				edge_count_pe[pe_i].push_back(edge_count);
+				if(edge_count > maxEdge) maxEdge = edge_count;
+				if(edge_count > max_effect_edge) max_effect_edge = edge_count;
+			}
+			effect_edge += max_effect_edge;
+			// for(int j = 0; j < shift_edge_list.size(); j ++){
+			// 	dep_graph_ch[i%NUM_CH].push_back(shift_edge_list[j]);
+			// }
+			// node_count += nodes.size() / 8;
+			// edge_count += shift_edge_list.size() / 8;
+			// std::clog << "node: " << node_count << std::endl;
+			// std::clog << "edge: " << edge_count << std::endl;
+			// inst.push_back(node_count);
+			// inst.push_back(edge_count);
+
+			}
+
+			inst.push_back(maxNode);
+			inst.push_back(maxEdge);
+
+			total_iter_count += (maxNode + maxEdge)*NUM_CH;
+			total_effect_iter_count += maxNode * NUM_CH + effect_edge;
+
+			//process dep graph ptr
+			for(int pe_i = 0; pe_i < NUM_CH; pe_i++){
+				// std::clog << "pe: " << pe_i << std::endl;
+				int offset = 0;
+				int prev_size = dep_graph_ch[pe_i].size();
+				vector<ap_uint<64>> node_tmp_cache;
+				for(int b = offset; b < offset + node_count_pe[pe_i]*8; b++){
+					node_tmp_cache.push_back(dep_graph_tmp[pe_i][b]);
+				}
+				for(int b = 0; b < maxNode - node_count_pe[pe_i]; b++){
+					for(int n = 0; n < 8; n++){
+						ap_uint<64> a = 0;
+						a(63,48) = 0xFFFF;
+						a(31,0) = tapa::bit_cast<ap_uint<32>>((float)(1.0));
+						node_tmp_cache.push_back(a);
+					}
+				}
+				offset += node_count_pe[pe_i]*8;
+				for(int l = 0; l < maxNode*8; l++){
+					dep_graph_ch[pe_i].push_back(node_tmp_cache[l]);
+				}
+				for(int b = 0; b < NUM_CH; b++){
+					for(int l = offset; l < offset + edge_count_pe[pe_i][b]*8; l++){
+						dep_graph_ch[pe_i].push_back(dep_graph_tmp[pe_i][l]);
+					}
+					for(int l = 0; l < maxEdge - edge_count_pe[pe_i][b]; l++){
+						for(int n = 0; n < 8; n++){
+							ap_uint<64> a = 0;
+							a(63,48) = 0xFFFF;
+							dep_graph_ch[pe_i].push_back(a);
+						}
+					}
+					offset += edge_count_pe[pe_i][b]*8;
+				}
+			}
+			layer_count++;
+
+		}
+		// assert(inst.size() % 2 == 0);
+		// dep_graph_ptr[i%NUM_CH].push_back(inst.size()/2);
+		// for(auto num : inst){
+		// 	dep_graph_ptr[i%NUM_CH].push_back(num);
+		// }
+
+		dep_graph_ptr.push_back(layer_count);
+		for(auto num : inst){
+			dep_graph_ptr.push_back(num);
+		}
+
+	}
+
+	LOG(INFO) << "total count: " << total_iter_count;
+	LOG(INFO) << "total effective count: " << total_effect_iter_count;
+
+	// for(int i = 0; i < NUM_CH; i++){
+	// 	int size = dep_graph_ptr[i].size();
+	// 	dep_graph_ptr[i].insert(dep_graph_ptr[i].begin(), size);
+	// }
+}
+
 void merge_ptr(int N,
 	aligned_vector<int>& dep_graph_ptr,
 	aligned_vector<int>& edge_list_ptr,
@@ -606,12 +978,12 @@ void merge_data(
 					}
 				}
 				dep_graph_ch_offset+=N_node*8;
-				for(int j = 0; j < N_edge * (ch+1); j++){
+				for(int j = 0; j < N_edge * NUM_CH; j++){
 					for(int k = 0; k < 8; k++){
 						comp_packet_ch[ch].push_back(dep_graph_ch[ch][(j*8 + k) + dep_graph_ch_offset]);
 					}
 				}
-				dep_graph_ch_offset+=(N_edge)*(ch+1) * 8;
+				dep_graph_ch_offset+=(N_edge)*NUM_CH * 8;
 			}
 			dep_graph_offset+=N_level*2;
 		}
@@ -762,9 +1134,9 @@ int main(int argc, char* argv[]){
 	int maxLenCounter = 0;
 
 	convertCSRToCSC(N, nnz, IA, JA, A, csc_col_ptr, csc_row_ind, csc_val, csc_col_ptr_fpga, csc_row_ind_fpga, K_csc);
-	generate_edgelist_spmv(N, IA, JA, A, edge_list_ch, edge_list_ptr, if_need);
+	generate_edgelist_spmv_cyclic(N, IA, JA, A, edge_list_ch, edge_list_ptr, if_need);
 	process_spmv_ptr(edge_list_ch, edge_list_ptr, edge_list_ch_mod, edge_list_ptr_mod, maxLenCounter);
-	generate_dependency_graph_for_pes(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
+	generate_dependency_graph_for_pes_cyclic(N, IA, JA, A, dep_graph_ch, dep_graph_ptr);
 	merge_ptr(N, dep_graph_ptr, edge_list_ptr_mod, merge_inst_ptr);
 	merge_data(N, dep_graph_ptr, edge_list_ptr_mod, dep_graph_ch, edge_list_ch_mod, comp_packet_ch);
 
@@ -798,6 +1170,10 @@ int main(int argc, char* argv[]){
 	cycle[0] = 0;
 
 	int NUM_ITE = (N%WINDOW_LARGE_SIZE == 0)?N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
+
+	// for(int i = 0; i < NUM_CH; i++){
+	// 	LOG(INFO) << comp_packet_ch[i].size();
+	// }
 
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
                         tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(comp_packet_ch).reinterpret<ap_uint<512>>(),
@@ -850,10 +1226,10 @@ int main(int argc, char* argv[]){
 	}
 
         for (int i = 0; i < N; ++i){
-		if(std::fabs((std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i])/expected_x[i]) > 0.01 
-			&& std::fabs((x_fpga[i]-expected_x[i])/expected_x[i]) > 0.01 
-			&& std::fabs(x_fpga[i]-expected_x[i]) > 1e-4
-			&& std::fabs(std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i]) > 1e-4
+		if(std::fabs((std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i])/expected_x[i]) > 0.001 
+			&& std::fabs((x_fpga[i]-expected_x[i])/expected_x[i]) > 0.001 
+			// && std::fabs(x_fpga[i]-expected_x[i]) > 1e-4
+			// && std::fabs(std::fabs(x_fpga[i]-expected_x[i]) - round_off_error[i]) > 1e-4
 			){
 			std::clog << "index: " << i << ", expected: " << expected_x[i] << ", actual: " << x_fpga[i] << ", diff: " << std::fabs(x_fpga[i]-expected_x[i]) << std::endl;
 			unmatched++;
