@@ -58,7 +58,7 @@ void black_hole_xvec(tapa::istream<MultXVec>& fifo_in){
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
-	    // LOG(INFO) << "process level " << i << " ...";
+	    LOG(INFO) << "process level " << i << " ...";
 		int start = WINDOW_SIZE_div_16*i;
 
 write_main:
@@ -482,15 +482,10 @@ compute_node:
 	}
 
 write_x:
-	for(int i = 0; i < N;){
+	for(int i = 0; i < N; i++){
 	#pragma HLS loop_tripcount min=1 max=64
 	#pragma HLS pipeline II=1
-
-		if(!fifo_x_out.full()){
-			fifo_x_out.try_write(local_x[i%8][i >> 3]);
-			i++;
-		}
-
+		fifo_x_out.write(local_x[i%8][i >> 3]);
 	}
 
 }
@@ -514,6 +509,7 @@ void cache_x_and_feed(
 		MultXVec cache_x[WINDOW_SIZE_div_8];
 
 		#pragma HLS aggregate variable=cache_x
+		#pragma HLS bind_storage variable=cache_x type=RAM_2P impl=URAM
 
 		const int N = fifo_inst.read();
 		for(int i = 0; i < N;){
@@ -525,22 +521,15 @@ void cache_x_and_feed(
 		}
 
 		for(int i = 0; i < pe_i+1; i++){
-			if(i == pe_i){
-				for(int j = 0; j < N;){
-					#pragma HLS pipeline II=1
-					if(!fifo_x_out.full()){
-						fifo_x_out.try_write(cache_x[j]);
-						j++;
-					}
-				}
-			} else {
-				for(int j = 0; j < N;){
-					#pragma HLS pipeline II=1
-					if(!fifo_x_out.full() & !fifo_prev.empty()){
-						MultXVec tmp; fifo_prev.try_read(tmp);
-						fifo_x_out.try_write(tmp);
-						j++;
-					}
+			for(int j = 0; j < N;){
+				MultXVec tmp;
+				if(pe_i == i){
+					fifo_x_out.write(cache_x[j]);
+					j++;
+				} else if(!fifo_prev.empty()){
+					fifo_prev.try_read(tmp);
+					fifo_x_out.write(tmp);
+					j++;
 				}
 			}
 		}
