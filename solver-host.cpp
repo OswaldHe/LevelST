@@ -31,7 +31,7 @@ using aligned_vector = std::vector<T, tapa::aligned_allocator<T>>;
 
 void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 			tapa::mmap<int> merge_inst_ptr,
-			tapa::mmap<float_v16> f, 
+			tapa::mmaps<float_v16, 2> f, 
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N,
@@ -1057,7 +1057,7 @@ int main(int argc, char* argv[]){
 	vector<aligned_vector<int>> edge_list_ptr(NUM_CH);
 	vector<aligned_vector<ap_uint<64>>> edge_list_ch_mod(NUM_CH);
 	aligned_vector<int> edge_list_ptr_mod;
-	vector<aligned_vector<float>> f_fpga(NUM_CH);
+	vector<aligned_vector<float>> f_fpga(2);
 	aligned_vector<float> x_fpga(((N+15)/16)*16, 0.0);
 	aligned_vector<int> K_fpga;
 
@@ -1069,15 +1069,32 @@ int main(int argc, char* argv[]){
 
 	for(int i = 0; i < N; i++){
 		f.push_back(i/10.0);
-	    f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
 	}
 
 	if((N % 16) != 0){
 		int index = ((N-1)/WINDOW_SIZE)% NUM_CH;
 		int rem = 16 - (N % 16);
 		for(int i = 0; i < rem; i++) {
-			f_fpga[index].push_back(0.0);
 			f.push_back(0.0);
+		}
+	}
+
+	// distribute f
+	int num_ite = (f.size() / 8);
+	for(int i = 0, c_idx = 0; i < num_ite; i++){
+		for(int j = 0; j < 8; j++){
+			f_fpga[c_idx].push_back(f[i*8+j]);
+		}
+		c_idx++;
+		if(c_idx == 2) c_idx = 0;
+	}
+
+	for(int i = 0; i < 2; i++){
+		int size = f_fpga[i].size();
+		if((size % 16) != 0){
+			for(int j = 0; j < 16 - (size % 16); j++){
+				f_fpga[i].push_back(0.0);
+			}
 		}
 	}
 
@@ -1178,7 +1195,7 @@ int main(int argc, char* argv[]){
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
                         tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(comp_packet_ch).reinterpret<ap_uint<512>>(),
 						tapa::read_only_mmap<int>(merge_inst_ptr),
-						tapa::read_only_mmap<float>(f).reinterpret<float_v16>(),
+						tapa::read_only_mmaps<float, 2>(f_fpga).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(),
 						tapa::read_only_mmap<int>(if_need), N, NUM_ITE
 						// tapa::read_only_mmap<int>(K_csc)
