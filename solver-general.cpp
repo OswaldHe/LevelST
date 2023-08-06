@@ -58,7 +58,7 @@ void black_hole_xvec(tapa::istream<MultXVec>& fifo_in){
 void write_x(tapa::istream<float_v16>& x, tapa::ostream<bool>& fin_write, tapa::async_mmap<float_v16>& mmap, const int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
-	    LOG(INFO) << "process level " << i << " ...";
+	    // LOG(INFO) << "process level " << i << " ...";
 		int start = WINDOW_SIZE_div_16*i;
 
 write_main:
@@ -576,65 +576,30 @@ void cache_x_and_feed(
 	}
 }
 
-// void forward_node(
-// 	tapa::istream<int>& fifo_inst_in,
-// 	tapa::istream<MultXVec>& fifo_node_in,
-// 	tapa::ostream<MultXVec>& fifo_node_out,
-// 	tapa::ostream<float_v16>& fifo_x_out,
-// 	tapa::istream<int>& N_in
-// ){
-// 	for(;;){
-// 		float local_x[8][WINDOW_SIZE_div_8];
-
-// 		#pragma HLS bind_storage variable=local_x type=RAM_2P impl=URAM
-// 		#pragma HLS array_partition complete variable=local_x dim=1
-
-// 		const int N_layer = fifo_inst_in.read();
-// 		const int N = N_in.read();
-// 		const int num_ite = (N + 15) / 16;
-
-// 		for(int i = 0; i < N_layer; i++){
-// 			const int N_node = fifo_inst_in.read();
-
-// 			for(int j = 0; j < N_node;){
-// 				if(!fifo_node_in.empty()){
-// 					MultXVec xvec; fifo_node_in.try_read(xvec);
-// 					if (i < N_layer-1) fifo_node_out.write(xvec);
-					
-// 					for(int k = 0; k < 8; k++){
-// 						#pragma HLS unroll
-// 						auto row = xvec.row[k];
-// 						auto val = xvec.axv[k];
-// 						if(row[15] == 0){
-// 							local_x[k][row >> 3] = val;
-// 						}
-// 					}
-// 					j++;
-// 				}
-// 			}
-// 		}
-
-// 		for(int i = 0; i < num_ite; i++){
-// 		#pragma HLS loop_tripcount min=1 max=64
-// 		#pragma HLS pipeline II=1
-
-// 			float_v16 tmp_x;
-// 			for(int j = 0; j < 16; j++){
-// 			#pragma HLS unroll
-// 				tmp_x[j] = local_x[j%8][(i << 1)+(j >> 3)];
-// 			}
-// 			fifo_x_out.write(tmp_x);
-
-// 		}
-
-// 	}
-
-// }
-
 void read_comp_packet(
+	const int A_LEN,
+	tapa::async_mmap<ap_uint<512>>& comp_packet_ch,
+	tapa::ostream<ap_uint<512>>& fifo_comp_packet_out
+){
+	for (int i_req = 0, i_resp = 0; i_resp < A_LEN;) {
+	#pragma HLS pipeline II=1
+		if(i_req < A_LEN && !comp_packet_ch.read_addr.full()){
+				comp_packet_ch.read_addr.try_write(i_req);
+				++i_req;
+		}
+		if(!comp_packet_ch.read_data.empty()){
+			ap_uint<512> tmp;
+			comp_packet_ch.read_data.try_read(tmp);
+			fifo_comp_packet_out.write(tmp);
+			++i_resp;
+		}
+	}
+}
+
+void split_comp_packet(
 	const int pe_i,
 	const int NUM_ITE,
-	tapa::async_mmap<ap_uint<512>>& comp_packet_ch,
+	tapa::istream<ap_uint<512>>& comp_packet_ch,
 	tapa::istream<int>& comp_packet_ptr,
 	tapa::ostream<int>& comp_packet_ptr_out,
 	tapa::ostream<ap_uint<512>>& fifo_solve_node,
@@ -642,7 +607,6 @@ void read_comp_packet(
 	tapa::ostream<int>& fifo_inst_solve_node,
 	tapa::ostream<int>& fifo_inst_spmv
 ){
-	int offset = 0;
 	for(int round = 0; round < NUM_ITE; round++){
 		const int spmv_N = comp_packet_ptr.read();
 		const int dep_graph_N = comp_packet_ptr.read();
@@ -663,20 +627,14 @@ void read_comp_packet(
 			comp_packet_ptr_out.write(N);
 			fifo_inst_spmv.write(N);
 
-			for (int i_req = 0, i_resp = 0; i_resp < num_ite;) {
+			for (int j = 0; j < num_ite;) {
 			#pragma HLS pipeline II=1
-				if(i_req < num_ite && !comp_packet_ch.read_addr.full()){
-						comp_packet_ch.read_addr.try_write(i_req+offset);
-						++i_req;
-				}
-				if(!comp_packet_ch.read_data.empty()){
-					ap_uint<512> tmp;
-					comp_packet_ch.read_data.try_read(tmp);
-					fifo_spmv.write(tmp);
-					++i_resp;
+				if(!comp_packet_ch.empty()){
+					ap_uint<512> packet; comp_packet_ch.try_read(packet);
+					fifo_spmv.write(packet);
+					j++;
 				}
 			}
-			offset+=num_ite;
 		}
 
 		for(int i = 0; i < dep_graph_N-1; i++){
@@ -689,39 +647,24 @@ void read_comp_packet(
 			fifo_inst_spmv.write(N_node);
 			fifo_inst_spmv.write(N_edge);
 
-			for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
+			for (int j = 0; j < N_node;) {
 			#pragma HLS pipeline II=1
-				if((i_req < N_node) & !comp_packet_ch.read_addr.full()){
-						comp_packet_ch.read_addr.try_write(i_req+offset);
-						++i_req;
-				}
-				if(!comp_packet_ch.read_data.empty()){
-					ap_uint<512> tmp;
-					comp_packet_ch.read_data.try_read(tmp);
-					fifo_solve_node.write(tmp);
-					++i_resp;
+				if(!comp_packet_ch.empty()){
+					ap_uint<512> packet; comp_packet_ch.try_read(packet);
+					fifo_solve_node.write(packet);
+					j++;
 				}
 			}
-			offset+=N_node;
 
 			fifo_inst_solve_node.write(N_edge * NUM_CH);
 
-			for(int edge_sec = 0; edge_sec < NUM_CH; edge_sec++){
-
-				for (int i_req = 0, i_resp = 0; i_resp < N_edge;) {
-				#pragma HLS pipeline II=1 
-					if((i_req < N_edge) & !comp_packet_ch.read_addr.full()){
-							comp_packet_ch.read_addr.try_write(i_req+offset);
-							++i_req;
-					}
-					if(!comp_packet_ch.read_data.empty()){
-						ap_uint<512> tmp;
-						comp_packet_ch.read_data.try_read(tmp);
-						fifo_spmv.write(tmp);
-						++i_resp;
-					}
+			for (int j = 0; j < N_edge * NUM_CH;) {
+			#pragma HLS pipeline II=1
+				if(!comp_packet_ch.empty()){
+					ap_uint<512> packet; comp_packet_ch.try_read(packet);
+					fifo_spmv.write(packet);
+					j++;
 				}
-				offset+=N_edge;
 			}
 		}
 
@@ -732,20 +675,14 @@ void read_comp_packet(
 		comp_packet_ptr_out.write(N_edge);
 		fifo_inst_solve_node.write(N_node);
 
-		for (int i_req = 0, i_resp = 0; i_resp < N_node;) {
+		for (int j = 0; j < N_node;) {
 		#pragma HLS pipeline II=1
-			if((i_req < N_node) & !comp_packet_ch.read_addr.full()){
-					comp_packet_ch.read_addr.try_write(i_req+offset);
-					++i_req;
-			}
-			if(!comp_packet_ch.read_data.empty()){
-				ap_uint<512> tmp;
-				comp_packet_ch.read_data.try_read(tmp);
-				fifo_solve_node.write(tmp);
-				++i_resp;
+			if(!comp_packet_ch.empty()){
+				ap_uint<512> packet; comp_packet_ch.try_read(packet);
+				fifo_solve_node.write(packet);
+				j++;
 			}
 		}
-		offset+=N_node;
 	}
 }
 
@@ -920,7 +857,8 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N, // # of dimension
-			const int NUM_ITE // # number of rounds
+			const int NUM_ITE, // # number of rounds
+			const int A_LEN
 			){
 
 	tapa::streams<int, NUM_CH, FIFO_DEPTH> N_val("n_val");
@@ -963,6 +901,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 
 	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_cache_x("fifo_cache_x");
 	tapa::streams<int, NUM_CH, FIFO_DEPTH> fifo_inst_cache_x("fifo_inst_cache_x");
+	tapa::streams<ap_uint<512>, NUM_CH, FIFO_DEPTH> fifo_comp_packet_out("fifo_comp_packet_out");
 
 
 	tapa::task()
@@ -976,10 +915,16 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 		// .invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
 		.invoke<tapa::join>(read_all_ptr, merge_inst_ptr, merge_inst_q)
 		.invoke<tapa::join, NUM_CH>(
-			read_comp_packet, 
+			read_comp_packet,
+			A_LEN,
+			comp_packet_ch,
+			fifo_comp_packet_out
+		)
+		.invoke<tapa::join, NUM_CH>(
+			split_comp_packet, 
 			tapa::seq(),
 			NUM_ITE,
-			comp_packet_ch,
+			fifo_comp_packet_out,
 			merge_inst_q,
 			merge_inst_q,
 			fifo_solve_node,

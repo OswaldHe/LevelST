@@ -35,7 +35,8 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 			tapa::mmap<float_v16> x, 
 			tapa::mmap<int> if_need,
 			const int N,
-			const int NUM_ITE
+			const int NUM_ITE,
+			const int A_LEN
 			);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
@@ -1187,6 +1188,7 @@ int main(int argc, char* argv[]){
 	cycle[0] = 0;
 
 	int NUM_ITE = (N%WINDOW_LARGE_SIZE == 0)?N/WINDOW_LARGE_SIZE:N/WINDOW_LARGE_SIZE+1;
+	int A_LEN = (comp_packet_ch[0].size() + 7) / 8;
 
 	// for(int i = 0; i < NUM_CH; i++){
 	// 	LOG(INFO) << comp_packet_ch[i].size();
@@ -1197,8 +1199,7 @@ int main(int argc, char* argv[]){
 						tapa::read_only_mmap<int>(merge_inst_ptr),
 						tapa::read_only_mmaps<float, 2>(f_fpga).reinterpret<float_v16>(),
                         tapa::read_write_mmap<float>(x_fpga).reinterpret<float_v16>(),
-						tapa::read_only_mmap<int>(if_need), N, NUM_ITE
-						// tapa::read_only_mmap<int>(K_csc)
+						tapa::read_only_mmap<int>(if_need), N, NUM_ITE, A_LEN
 						);
     std::clog << "kernel time: " << kernel_time_ns * 1e-9 << " s" << std::endl;
 	std::clog << "cycle count: " << cycle[0] << std::endl;
