@@ -1,8 +1,10 @@
 *.log
 _x/
 .Xil/
+solver.xilinx_u280_gen3x16_xdma_1_202211_1.hw.xo.tapa/
 solver.xilinx_u280_xdma_201920_3.hw.xo.tapa/
 *.xclbin
+solver.xilinx_u280_gen3x16_xdma_1_202211_1*
 solver.xilinx_u280_xdma_201920_3*
 trig-solver
 vitis_run_hw*/
