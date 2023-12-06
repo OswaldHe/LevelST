@@ -42,6 +42,7 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 			);
 
 DEFINE_string(bitstream, "", "path to bitstream file");
+DEFINE_string(file, "lp1.mtx", "path to matrix file");
 
 void convertCSRToCSC(int N, int K /* num of non-zeros*/, 
 		const aligned_vector<int>& csr_row_ptr,
@@ -1018,16 +1019,12 @@ int main(int argc, char* argv[]){
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
 
 	const int D = argc > 1 ? atoll(argv[1]) : 60000;
-	// const int remainder = N % WINDOW_SIZE;
-	// int K = N*2-N/WINDOW_SIZE;
-	// if(remainder != 0) K --;
-	// int K = N*2 - 1;
 	int M, K, nnz;
     vector<int> CSRRowPtr;
     vector<int> CSRColIndex;
     vector<float> CSRVal;
 
-	read_suitsparse_matrix_FP64("lp1.mtx", // TODO: pass it as an argument
+	read_suitsparse_matrix_FP64(FLAGS_file.c_str(), 
                            CSRRowPtr,
                            CSRColIndex,
                            CSRVal,
@@ -1064,12 +1061,6 @@ int main(int argc, char* argv[]){
 	aligned_vector<float> x_fpga(((N+15)/16)*16, 0.0);
 	aligned_vector<int> K_fpga;
 
-	// for(int i = 0; i < NUM_CH; i++){
-	// 	for(int j = 0; j < N/NUM_CH; j++){
-	// 		x_fpga[i].push_back(0.0);
-	// 	}
-	// }
-
 	for(int i = 0; i < N; i++){
 		f.push_back(i/10.0);
 	}
@@ -1104,39 +1095,6 @@ int main(int argc, char* argv[]){
 	std::clog << M << std::endl;
 	std::clog << nnz << std::endl;
 
-
-	// int ind = 0;
-	// int acc = 0;
-	// //populate lower triangular sparse matrix
-    // for (int i = 0; i < N; ++i) {
-	// 	f[i] = 0.5*(i+1);
-	// 	f_fpga[(i/WINDOW_SIZE)%NUM_CH].push_back(f[i]);
-	// 	if(i == 0) {
-	// 		A[ind] = i+1;
-	// 		JA[ind] = i;
-	// 		acc += 1;
-	// 		ind++;
-	// 	} else {
-	// 		A[ind] = 1.f;
-	// 		JA[ind] = i-(i/2)-1;
-	// 		A[ind+1] = i+1;
-	// 		JA[ind+1] = i;
-	// 		if(i % WINDOW_SIZE == 0) {
-	// 			K_fpga.push_back(acc);
-	// 			acc = 0;
-	// 		}
-	// 		acc +=2;
-	// 		ind+=2;
-	// 	}
-	// 	IA[i] = ind;
-    // }
-	// K_fpga.push_back(acc);
-	//readCSRMatrix("L_can256.txt", IA, JA, A);
-	
-	//std::clog << K_fpga[1] << std::endl;
-	// std::clog << IA.size() << std::endl;
-	// std::clog << A.size() << std::endl;
-
 	aligned_vector<float> csc_val(nnz, 0.0);
 	aligned_vector<int> csc_col_ptr(N, 0);
 	aligned_vector<int> csc_row_ind(nnz, 0);
@@ -1167,10 +1125,6 @@ int main(int argc, char* argv[]){
 
 	std::clog << "need to read hbm: " << need_count << " times" << std::endl;
 	std::clog << "hbm + spmv latency: " << need_count*(WINDOW_SIZE_div_2/16+10) + (if_need.size()-need_count) + maxLenCounter/8 << " cycles" << std::endl;
-
-	// std::clog << K_csc[156] << std::endl;
-	// std::clog << edge_list_ptr[1].size() << std::endl;
-	// std::clog << csc_row_ind[2] << std::endl;
 
 	for(int i = 0; i < NUM_CH; i++){
 		if(edge_list_ch_mod[i].size() == 0){
@@ -1221,10 +1175,6 @@ int main(int argc, char* argv[]){
 	}
 	size = block_fwd.size();
 	block_fwd.insert(block_fwd.begin(), size);
-
-	// for(int i = 0; i < NUM_CH; i++){
-	// 	LOG(INFO) << comp_packet_ch[i].size();
-	// }
 
     int64_t kernel_time_ns = tapa::invoke(TrigSolver, FLAGS_bitstream,
                         tapa::read_only_mmaps<ap_uint<64>, NUM_CH>(comp_packet_ch).reinterpret<ap_uint<512>>(),

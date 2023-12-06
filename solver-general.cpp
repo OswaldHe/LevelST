@@ -8,9 +8,7 @@ constexpr int WINDOW_SIZE = 8192;
 constexpr int WINDOW_SIZE_div_8 = 1024;
 constexpr int WINDOW_SIZE_MAX = 8192;
 constexpr int WINDOW_SIZE_div_16 = 512;
-// constexpr int WINDOW_SIZE_div_32 = 32;
 constexpr int NUM_CH = 16;
-// constexpr int MULT_SIZE = 16;
 constexpr int FIFO_DEPTH = 2;
 constexpr int WINDOW_LARGE_SIZE = WINDOW_SIZE * NUM_CH;
 
@@ -23,8 +21,6 @@ struct MultXVec {
 	tapa::vec_t<ap_uint<16>, 8> row;
 	float_v8 axv;
 };
-
-//TODO: both spmv and dep_graph take data in the same format (row 16 + col 16 + val 32)
 
 template <typename data_t>
 inline void bh(tapa::istream<data_t> & q) {
@@ -58,7 +54,6 @@ void black_hole_xvec(tapa::istream<MultXVec>& fifo_in){
 void write_x(tapa::istream<float_v16>& x, tapa::async_mmap<float_v16>& mmap, tapa::ostream<bool>& fin_write, const int total_N){
 	int num_block = total_N / WINDOW_SIZE;
 	for(int i = 0; i < num_block; i++){
-	    // LOG(INFO) << "process level " << i << " ...";
 		int start = WINDOW_SIZE_div_16*i;
 
 write_main:
@@ -73,7 +68,6 @@ write_main:
 			}
 			if(!mmap.write_resp.empty()){
 				i_resp += unsigned(mmap.write_resp.read(nullptr))+1;
-				//LOG(INFO) << i_resp;
 			}
 		}
 
@@ -93,7 +87,6 @@ write_residue:
 		}
 		if(!mmap.write_resp.empty()){
 			i_resp += unsigned(mmap.write_resp.read(nullptr))+1;
-			//LOG(INFO) << i_resp;
 		}
 	}
 	fin_write.write(false);
@@ -195,19 +188,6 @@ void dispatch_inst_x(
 	}
 }
 
-// void forward(
-// 	tapa::istream<MultXVec>& fifo_x_in,
-// 	tapa::ostream<MultXVec>& fifo_x_out
-// ) {
-// 	for(;;){
-// 		#pragma HLS pipeline II=1
-// 		if(!fifo_x_in.empty()){
-// 			MultXVec tmp; fifo_x_in.try_read(tmp);
-// 			fifo_x_out.write(tmp);
-// 		}
-// 	}
-// }
-
 void PEG_Xvec(
 	tapa::istream<int>& fifo_inst_in,
 	tapa::istream<MultXVec>& fifo_node_in,
@@ -281,7 +261,6 @@ void PEG_Xvec(
 						if(row[15] == 0){
 							float val_f = tapa::bit_cast<float>(val);
 							xvec.axv[k] = (local_x[k/2][col%8][(col >> 3)] * val_f);
-							// if(pe_i == 0 && row == 0) LOG(INFO) << "row: " << row << ", col:" << col << ", t1: " << local_x[k/2][col%8][(col >> 3)] << ", t2: " << val_f; 
 						}
 					}
 					fifo_aXVec.write(xvec);
@@ -378,7 +357,6 @@ compute_node:
 					if(row[15] == 0){
 						float ans = local_y[k][(row >> 3)] * val_f;
 						xvec.axv[k] = ans;
-						// if(pe_i == 0 && row == 3) LOG(INFO) << "row: " << row << ", t1: " << local_y[k][(row >> 3)] << ", t2: " << val_f; 
 					}
 				}
 				fifo_x_out.write(xvec);
@@ -883,26 +861,17 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 
 
 	tapa::streams<float_v2, NUM_CH, FIFO_DEPTH> f_q("f");
-	// tapa::streams<int, NUM_CH, FIFO_DEPTH> spmv_inst("spmv_inst");
-	// tapa::streams<int, NUM_CH, FIFO_DEPTH> spmv_inst_out("spmv_inst_out");
-	// tapa::streams<int, NUM_CH, FIFO_DEPTH> N_sub_1("n_sub_1");
-	// tapa::streams<int, NUM_CH, FIFO_DEPTH> N_sub_2("n_sub_2");
-	// tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> y("y");
 	tapa::stream<float_v16, FIFO_DEPTH> x_next("x_next");
-	// tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_apt("x_apt");
-	// tapa::streams<float_v16, NUM_CH, FIFO_DEPTH> x_bypass("x_bypass");
 	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_aXVec("fifo_aXVec");
 
 	tapa::streams<int, NUM_CH, FIFO_DEPTH> fifo_forward_node("fifo_forward_node");
 	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_node_to_edge("fifo_node_to_edge");
-	// tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_node_out("fifo_node_out");
 	tapa::streams<MultXVec, NUM_CH*2+1, FIFO_DEPTH> fifo_broadcast("fifo_broadcast");
 
 	tapa::streams<int, NUM_CH+3, FIFO_DEPTH> fifo_need("fifo_need");
 
 	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_node_down("fifo_node_down");
 	tapa::streams<float_v2, 8, FIFO_DEPTH> x_merge("x_merge");
-	// tapa::stream<MultXVec, FIFO_DEPTH> fifo_apt("fifo_apt");
 
 	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_cache_x("fifo_cache_x");
 	tapa::streams<MultXVec, NUM_CH, FIFO_DEPTH> fifo_cache_x_2("fifo_cache_x_2");
@@ -913,14 +882,12 @@ void TrigSolver(tapa::mmaps<ap_uint<512>, NUM_CH> comp_packet_ch,
 
 	tapa::task()
 		.invoke<tapa::join>(read_len, N, NUM_ITE, N_val)
-		// .invoke<tapa::join>(fill_zero, x_q)
 		.invoke<tapa::detach>(write_progress, fin_write, block_id, block_fin)
 		.invoke<tapa::join>(read_all_ptr, if_need, fifo_need)
 		.invoke<tapa::join>(read_x, NUM_ITE, fifo_need, fifo_need, block_id)
 		.invoke<tapa::join>(read_all_ptr, block_fwd, fifo_block_fwd)
 		.invoke<tapa::join>(request_X, NUM_ITE, x, fifo_x_fwd, req_x, fifo_need, fifo_need, block_fin)
 		.invoke<tapa::join, 2>(read_f, N, f, f_q)
-		// .invoke<tapa::join, NUM_CH>(read_float_vec, tapa::seq(), N, f, N_val, N_sub_1, f_q)
 		.invoke<tapa::join>(read_all_ptr, merge_inst_ptr, merge_inst_q)
 		.invoke<tapa::join, NUM_CH>(
 			read_comp_packet,

@@ -95,7 +95,7 @@ void sort_by_fn(int nnz_s,
 }
 
 void mm_init_read(FILE * f,
-                  char * filename,
+                  const char * filename,
                   MM_typecode & matcode,
                   int & m,
                   int & n,
@@ -178,7 +178,7 @@ void load_S_matrix(FILE * f_A,
     nnz = idx;
 }
 
-void read_suitsparse_matrix_FP64(char * filename_A,
+void read_suitsparse_matrix_FP64(const char * filename_A,
                                  vector<int> & elePtr,
                                  vector<int> & eleIndex,
                                  vector<float> & eleVal,

@@ -14,21 +14,7 @@ The host code takes [Matrix Market](https://math.nist.gov/MatrixMarket/formats.h
 
 ## Build Host and Software Simulation
 
-Change the matrix you want to test in the source code on line 1030 in `solver-host.cpp` (We will change it to pass as an argument)
-
-```cpp
-read_suitsparse_matrix_FP64("lp1.mtx", // TODO: change it to other test matrix
-                           CSRRowPtr,
-                           CSRColIndex,
-                           CSRVal,
-                           M,
-                           K,
-                           nnz);
-```
-
-The default matrix is `lp1.mtx` provided in this repository.
-
-Then, compile the host code
+Compile the host code
 
 ```bash
 make
@@ -40,6 +26,10 @@ This will run `g++` to compile the host code for you.
 Finally, execute the software simulation
 ```
 ./trig-solver
+```
+The default matrix is `lp1.mtx` provided in this repository. To test other matrices, simply pass an argument by
+```
+./trig-solver --file <matrix_file.mtx>
 ```
 
 ## Run TAPA & Autobridge for HLS and Floorplanning Optimization
