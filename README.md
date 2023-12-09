@@ -1,5 +1,7 @@
 # LevelST: Stream-based Accelerator for Sparse Triangular Solver with HBM-FPGA
 
+[![DOI](https://zenodo.org/badge/599503718.svg)](https://zenodo.org/doi/10.5281/zenodo.10278197)
+
 LevelST is a HBM-FPGA based stream accelerator for sparse triangular solver. It is designed and tested on Xilinx Alveo U280 FPGA board.
 
 **Dependencies:**
