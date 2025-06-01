@@ -6,9 +6,9 @@ LevelST is an HBM-FPGA-based stream accelerator for sparse triangular solvers. I
 
 **Dependencies:**
 
-- TAPA & Autobridge (follow [this](https://tapa.readthedocs.io/en/release/installation.html) instruction to install TAPA and other dependencies)
+- TAPA & Autobridge (follow [this](https://tapa.readthedocs.io/en/main/user/installation.html) instruction to install TAPA and other dependencies)
 - Vitis 2021.2, Vivado 2021.2
-- Xilinx `xilinx_u280_xdma_201920_3` platform shell (more recent platform requires modification on Autobridge source file)
+- Xilinx `xilinx_u280_xdma_201920_3` platform shell [[dev](https://drive.google.com/file/d/1GvZ1_x8_W5q_h4U76dH9iQXDN9xPeLvv/view?usp=drive_link)] [[deployment](https://drive.google.com/file/d/1wQywrYvW9r0oBccn-PqoS4KPZJfEW3_J/view?usp=drive_link)] (more recent platform requires access to [RapidStream](https://rapidstream-da.com/). For quick test, please use this platform.)
 
 **Input matrix format:**
 
